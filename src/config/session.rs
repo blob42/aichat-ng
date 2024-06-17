@@ -11,6 +11,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs::{self, create_dir_all, read_to_string};
 use std::path::Path;
+use std::mem;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Session {
@@ -401,6 +402,16 @@ impl Session {
             messages.push(Message::new(MessageRole::User, input.message_content()));
         }
         messages
+    }
+
+    pub fn replace_last_reply(&mut self, reply: &str) {
+        let new_msg = Message{ 
+            role: MessageRole::Assistant ,
+            content: MessageContent::Text(reply.into())
+        };
+        let len = self.messages.len();
+        let _ = mem::replace(&mut self.messages[len - 1], new_msg);
+        self.dirty = true;
     }
 }
 

@@ -33,7 +33,7 @@ lazy_static! {
 const MENU_NAME: &str = "completion_menu";
 
 lazy_static! {
-    static ref REPL_COMMANDS: [ReplCommand; 23] = [
+    static ref REPL_COMMANDS: [ReplCommand; 24] = [
         ReplCommand::new(".help", "Show this help message", AssertState::pass()),
         ReplCommand::new(".info", "View system info", AssertState::pass()),
         ReplCommand::new(".model", "Change the current LLM", AssertState::pass()),
@@ -121,6 +121,8 @@ lazy_static! {
         ReplCommand::new(".set", "Adjust settings", AssertState::pass()),
         ReplCommand::new(".copy", "Copy the last response", AssertState::pass()),
         ReplCommand::new(".exit", "Exit the REPL", AssertState::pass()),
+        ReplCommand::new(".edit_last", "Edit the last response", 
+            AssertState::pass()),
     ];
     static ref COMMAND_RE: Regex = Regex::new(r"^\s*(\.\S*)\s*").unwrap();
     static ref MULTILINE_RE: Regex = Regex::new(r"(?s)^\s*:::\s*(.*)\s*:::\s*$").unwrap();
@@ -335,6 +337,9 @@ Tips: use <tab> to autocomplete conversation starter text.
                         self.config.write().clear_session_messages()?;
                     }
                     _ => unknown_command()?,
+                },
+                ".edit_last" => {
+                    self.config.write().edit_last_message()?;
                 },
                 _ => unknown_command()?,
             },
