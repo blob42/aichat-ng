@@ -1,3 +1,4 @@
+use super::rag_dedicated::*;
 use super::*;
 
 use anyhow::{bail, Context, Result};
@@ -7,6 +8,7 @@ use serde_json::{json, Value};
 
 const CHAT_COMPLETIONS_API_URL: &str = "https://api.cohere.ai/v1/chat";
 const EMBEDDINGS_API_URL: &str = "https://api.cohere.ai/v1/embed";
+const RERANK_API_URL: &str = "https://api.cohere.ai/v1/rerank";
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct CohereConfig {
@@ -69,13 +71,28 @@ impl CohereClient {
 
         Ok(builder)
     }
+
+    fn rerank_builder(&self, client: &ReqwestClient, data: RerankData) -> Result<RequestBuilder> {
+        let api_key = self.get_api_key()?;
+
+        let body = rag_dedicated_build_rerank_body(data, &self.model);
+
+        let url = RERANK_API_URL;
+
+        debug!("Cohere Rerank Request: {url} {body}");
+
+        let builder = client.post(url).bearer_auth(api_key).json(&body);
+
+        Ok(builder)
+    }
 }
 
 impl_client_trait!(
     CohereClient,
     chat_completions,
     chat_completions_streaming,
-    embeddings
+    embeddings,
+    rag_dedicated_rerank
 );
 
 async fn chat_completions(builder: RequestBuilder) -> Result<ChatCompletionsOutput> {
@@ -137,7 +154,7 @@ async fn embeddings(builder: RequestBuilder) -> Result<EmbeddingsOutput> {
         catch_error(&data, status.as_u16())?;
     }
     let res_body: EmbeddingsResBody =
-        serde_json::from_value(data).context("Invalid request data")?;
+        serde_json::from_value(data).context("Invalid embeddings data")?;
     Ok(res_body.embeddings)
 }
 
@@ -188,8 +205,8 @@ fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Resu
                         .collect();
                     Some(json!({ "role": role, "message": list.join("\n\n") }))
                 }
-                MessageContent::ToolResults((tool_call_results, _)) => {
-                    tool_results = Some(tool_call_results);
+                MessageContent::ToolResults((results, _)) => {
+                    tool_results = Some(results);
                     None
                 }
             }
@@ -206,25 +223,6 @@ fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Resu
         "model": &model.name(),
         "message": message,
     });
-
-    if let Some(tool_results) = tool_results {
-        let tool_results: Vec<_> = tool_results
-            .into_iter()
-            .map(|tool_call_result| {
-                json!({
-                    "call": {
-                        "name": tool_call_result.call.name,
-                        "parameters": tool_call_result.call.arguments,
-                    },
-                    "outputs": [
-                        tool_call_result.output,
-                    ]
-
-                })
-            })
-            .collect();
-        body["tool_results"] = json!(tool_results);
-    }
 
     if let Some(v) = system_message {
         body["preamble"] = v.into();
@@ -245,6 +243,29 @@ fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Resu
     }
     if stream {
         body["stream"] = true.into();
+    }
+
+    if let Some(tool_results) = tool_results {
+        let tool_results: Vec<_> = tool_results
+            .into_iter()
+            .map(|tool_result| {
+                json!({
+                    "call": {
+                        "name": tool_result.call.name,
+                        "parameters": tool_result.call.arguments,
+                    },
+                    "outputs": [
+                        tool_result.output,
+                    ]
+
+                })
+            })
+            .collect();
+        body["tool_results"] = json!(tool_results);
+        if let Some(object) = body.as_object_mut() {
+            object.remove("chat_history");
+            object.remove("message");
+        }
     }
 
     if let Some(functions) = functions {

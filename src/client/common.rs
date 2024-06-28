@@ -2,12 +2,9 @@ use super::*;
 
 use crate::{
     config::{GlobalConfig, Input},
-    function::{eval_tool_calls, FunctionDeclaration, ToolCall, ToolCallResult},
+    function::{eval_tool_calls, FunctionDeclaration, ToolCall, ToolResult},
     render::{render_error, render_stream},
-    utils::{
-        prompt_input_integer, prompt_input_string, tokenize, watch_abort_signal, AbortSignal,
-        PromptKind,
-    },
+    utils::*,
 };
 
 use anyhow::{bail, Context, Result};
@@ -15,10 +12,10 @@ use async_trait::async_trait;
 use fancy_regex::Regex;
 use indexmap::IndexMap;
 use lazy_static::lazy_static;
-use reqwest::{Client as ReqwestClient, ClientBuilder, Proxy, RequestBuilder};
+use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{env, future::Future, time::Duration};
+use std::{future::Future, time::Duration};
 use tokio::sync::mpsc::unbounded_channel;
 
 const MODELS_YAML: &str = include_str!("../../models.yaml");
@@ -83,7 +80,9 @@ macro_rules! register_client {
                     let client_name = Self::name(local_config);
                     if local_config.models.is_empty() {
                         if let Some(models) = $crate::client::ALL_MODELS.iter().find(|v| {
-                            v.platform == $name || ($name == "openai-compatible" && local_config.name.as_deref() == Some(&v.platform))
+                            v.platform == $name ||
+                                ($name == OpenAICompatibleClient::NAME && local_config.name.as_deref() == Some(&v.platform)) ||
+                                ($name == RagDedicatedClient::NAME && local_config.name.as_deref() == Some(&v.platform))
                         }) {
                             return Model::from_config(client_name, &models.models);
                         }
@@ -145,11 +144,15 @@ macro_rules! register_client {
         }
 
         pub fn list_chat_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            list_models(config).into_iter().filter(|v| v.mode() == "chat").collect()
+            list_models(config).into_iter().filter(|v| v.model_type() == "chat").collect()
         }
 
         pub fn list_embedding_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            list_models(config).into_iter().filter(|v| v.mode() == "embedding").collect()
+            list_models(config).into_iter().filter(|v| v.model_type() == "embedding").collect()
+        }
+
+        pub fn list_reranker_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
+            list_models(config).into_iter().filter(|v| v.model_type() == "reranker").collect()
         }
     };
 }
@@ -236,11 +239,54 @@ macro_rules! impl_client_trait {
 
             async fn embeddings_inner(
                 &self,
-                client: &ReqwestClient,
-                data: EmbeddingsData,
-            ) -> Result<Vec<Vec<f32>>> {
+                client: &reqwest::Client,
+                data: $crate::client::EmbeddingsData,
+            ) -> Result<$crate::client::EmbeddingsOutput> {
                 let builder = self.embeddings_builder(client, data)?;
                 $embeddings(builder).await
+            }
+        }
+    };
+    ($client:ident, $chat_completions:path, $chat_completions_streaming:path, $embeddings:path, $rerank:path) => {
+        #[async_trait::async_trait]
+        impl $crate::client::Client for $crate::client::$client {
+            client_common_fns!();
+
+            async fn chat_completions_inner(
+                &self,
+                client: &reqwest::Client,
+                data: $crate::client::ChatCompletionsData,
+            ) -> anyhow::Result<$crate::client::ChatCompletionsOutput> {
+                let builder = self.chat_completions_builder(client, data)?;
+                $chat_completions(builder).await
+            }
+
+            async fn chat_completions_streaming_inner(
+                &self,
+                client: &reqwest::Client,
+                handler: &mut $crate::client::SseHandler,
+                data: $crate::client::ChatCompletionsData,
+            ) -> Result<()> {
+                let builder = self.chat_completions_builder(client, data)?;
+                $chat_completions_streaming(builder, handler).await
+            }
+
+            async fn embeddings_inner(
+                &self,
+                client: &reqwest::Client,
+                data: $crate::client::EmbeddingsData,
+            ) -> Result<$crate::client::EmbeddingsOutput> {
+                let builder = self.embeddings_builder(client, data)?;
+                $embeddings(builder).await
+            }
+
+            async fn rerank_inner(
+                &self,
+                client: &reqwest::Client,
+                data: $crate::client::RerankData,
+            ) -> Result<$crate::client::RerankOutput> {
+                let builder = self.rerank_builder(client, data)?;
+                $rerank(builder).await
             }
         }
     };
@@ -291,7 +337,7 @@ pub trait Client: Sync + Send {
         let extra = self.extra_config();
         let timeout = extra.and_then(|v| v.connect_timeout).unwrap_or(10);
         let proxy = extra.and_then(|v| v.proxy.clone());
-        builder = set_proxy(builder, &proxy)?;
+        builder = set_proxy(builder, proxy.as_ref())?;
         let client = builder
             .connect_timeout(Duration::from_secs(timeout))
             .build()
@@ -308,7 +354,7 @@ pub trait Client: Sync + Send {
         let data = input.prepare_completion_data(self.model(), false)?;
         self.chat_completions_inner(&client, data)
             .await
-            .with_context(|| "Failed to get chat completions")
+            .with_context(|| "Failed to call chat-completions api")
     }
 
     async fn chat_completions_streaming(
@@ -334,7 +380,7 @@ pub trait Client: Sync + Send {
                 self.chat_completions_streaming_inner(&client, handler, data).await
             } => {
                 handler.done()?;
-                ret.with_context(|| "Failed to get chat completions")
+                ret.with_context(|| "Failed to call chat-completions api")
             }
             _ = watch_abort_signal(abort_signal) => {
                 handler.done()?;
@@ -345,10 +391,17 @@ pub trait Client: Sync + Send {
 
     async fn embeddings(&self, data: EmbeddingsData) -> Result<Vec<Vec<f32>>> {
         let client = self.build_client()?;
-        self.model().guard_max_concurrent_chunks(&data)?;
+        self.model().guard_max_batch_size(&data)?;
         self.embeddings_inner(&client, data)
             .await
-            .with_context(|| "Failed to get embeddings")
+            .context("Failed to call embeddings api")
+    }
+
+    async fn rerank(&self, data: RerankData) -> Result<RerankOutput> {
+        let client = self.build_client()?;
+        self.rerank_inner(&client, data)
+            .await
+            .context("Failed to call rerank api")
     }
 
     fn patch_chat_completions_body(&self, body: &mut Value) {
@@ -377,8 +430,16 @@ pub trait Client: Sync + Send {
         &self,
         _client: &ReqwestClient,
         _data: EmbeddingsData,
-    ) -> Result<Vec<Vec<f32>>> {
-        bail!("No embeddings api")
+    ) -> Result<EmbeddingsOutput> {
+        bail!("The client doesn't support embeddings api")
+    }
+
+    async fn rerank_inner(
+        &self,
+        _client: &ReqwestClient,
+        _data: RerankData,
+    ) -> Result<RerankOutput> {
+        bail!("The client doesn't support rerank api")
     }
 }
 
@@ -459,6 +520,31 @@ impl EmbeddingsData {
 
 pub type EmbeddingsOutput = Vec<Vec<f32>>;
 
+#[derive(Debug)]
+pub struct RerankData {
+    pub query: String,
+    pub documents: Vec<String>,
+    pub top_n: usize,
+}
+
+impl RerankData {
+    pub fn new(query: String, documents: Vec<String>, top_n: usize) -> Self {
+        Self {
+            query,
+            documents,
+            top_n,
+        }
+    }
+}
+
+pub type RerankOutput = Vec<RerankResult>;
+
+#[derive(Debug, Deserialize)]
+pub struct RerankResult {
+    pub index: usize,
+    pub relevance_score: f64,
+}
+
 pub type PromptAction<'a> = (&'a str, &'a str, bool, PromptKind);
 
 pub fn create_config(prompts: &[PromptAction], client: &str) -> Result<(String, Value)> {
@@ -479,7 +565,7 @@ pub fn create_openai_compatible_client_config(client: &str) -> Result<Option<(St
         None => Ok(None),
         Some((name, api_base)) => {
             let mut config = json!({
-                "type": "openai-compatible",
+                "type": OpenAICompatibleClient::NAME,
                 "name": name,
                 "api_base": api_base,
             });
@@ -505,12 +591,12 @@ pub fn create_openai_compatible_client_config(client: &str) -> Result<Option<(St
     }
 }
 
-pub async fn send_stream(
+pub async fn chat_completion_streaming(
     input: &Input,
     client: &dyn Client,
     config: &GlobalConfig,
     abort: AbortSignal,
-) -> Result<(String, Vec<ToolCallResult>)> {
+) -> Result<(String, Vec<ToolResult>)> {
     let (tx, rx) = unbounded_channel();
     let mut handler = SseHandler::new(tx, abort.clone());
 
@@ -681,23 +767,4 @@ fn to_json(kind: &PromptKind, value: &str) -> Value {
             Err(_) => value.into(),
         },
     }
-}
-
-fn set_proxy(builder: ClientBuilder, proxy: &Option<String>) -> Result<ClientBuilder> {
-    let proxy = if let Some(proxy) = proxy {
-        if proxy.is_empty() || proxy == "-" {
-            return Ok(builder);
-        }
-        proxy.clone()
-    } else if let Some(proxy) = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
-        .into_iter()
-        .find_map(|v| env::var(v).ok())
-    {
-        proxy
-    } else {
-        return Ok(builder);
-    };
-    let builder =
-        builder.proxy(Proxy::all(&proxy).with_context(|| format!("Invalid proxy `{proxy}`"))?);
-    Ok(builder)
 }

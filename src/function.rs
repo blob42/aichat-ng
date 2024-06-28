@@ -16,13 +16,10 @@ use std::{
 };
 
 pub const SELECTED_ALL_FUNCTIONS: &str = ".*";
-pub type ToolResults = (Vec<ToolCallResult>, String);
+pub type ToolResults = (Vec<ToolResult>, String);
 pub type FunctionsFilter = String;
 
-pub fn eval_tool_calls(
-    config: &GlobalConfig,
-    mut calls: Vec<ToolCall>,
-) -> Result<Vec<ToolCallResult>> {
+pub fn eval_tool_calls(config: &GlobalConfig, mut calls: Vec<ToolCall>) -> Result<Vec<ToolResult>> {
     let mut output = vec![];
     if calls.is_empty() {
         return Ok(output);
@@ -33,22 +30,22 @@ pub fn eval_tool_calls(
     }
     for call in calls {
         let result = call.eval(config)?;
-        output.push(ToolCallResult::new(call, result));
+        output.push(ToolResult::new(call, result));
     }
     Ok(output)
 }
 
-pub fn need_send_call_results(arr: &[ToolCallResult]) -> bool {
+pub fn need_send_tool_results(arr: &[ToolResult]) -> bool {
     arr.iter().any(|v| !v.output.is_null())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ToolCallResult {
+pub struct ToolResult {
     pub call: ToolCall,
     pub output: Value,
 }
 
-impl ToolCallResult {
+impl ToolResult {
     pub fn new(call: ToolCall, output: Value) -> Self {
         Self { call, output }
     }
@@ -75,10 +72,10 @@ impl Functions {
             vec![]
         };
 
-        let func_names = declarations.iter().map(|v| v.name.clone()).collect();
+        let names = declarations.iter().map(|v| v.name.clone()).collect();
 
         Ok(Self {
-            names: func_names,
+            names,
             declarations,
         })
     }
@@ -128,6 +125,15 @@ pub struct JsonSchema {
     pub required: Option<Vec<String>>,
 }
 
+impl JsonSchema {
+    pub fn is_empty_properties(&self) -> bool {
+        match &self.properties {
+            Some(v) => v.is_empty(),
+            None => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ToolCall {
     pub name: String,
@@ -166,18 +172,18 @@ impl ToolCall {
     pub fn eval(&self, config: &GlobalConfig) -> Result<Value> {
         let function_name = self.name.clone();
         let is_dangerously = config.read().is_dangerously_function(&function_name);
-        let (call_name, cmd_name, mut cmd_args) = match &config.read().bot {
-            Some(bot) => {
-                if !bot.functions().contains(&function_name) {
+        let (call_name, cmd_name, mut cmd_args) = match &config.read().agent {
+            Some(agent) => {
+                if !agent.functions().contains(&function_name) {
                     bail!(
                         "Unexpected call: {} {function_name} {}",
-                        bot.name(),
+                        agent.name(),
                         self.arguments
                     );
                 }
                 (
-                    format!("{}:{}", bot.name(), function_name),
-                    bot.name().to_string(),
+                    format!("{}:{}", agent.name(), function_name),
+                    agent.name().to_string(),
                     vec![function_name],
                 )
             }

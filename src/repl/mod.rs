@@ -6,9 +6,9 @@ use self::completer::ReplCompleter;
 use self::highlighter::ReplHighlighter;
 use self::prompt::ReplPrompt;
 
-use crate::client::send_stream;
+use crate::client::chat_completion_streaming;
 use crate::config::{AssertState, Config, GlobalConfig, Input, StateFlags};
-use crate::function::need_send_call_results;
+use crate::function::need_send_tool_results;
 use crate::render::render_error;
 use crate::utils::{create_abort_signal, set_text, AbortSignal};
 
@@ -33,19 +33,19 @@ lazy_static! {
 const MENU_NAME: &str = "completion_menu";
 
 lazy_static! {
-    static ref REPL_COMMANDS: [ReplCommand; 24] = [
+    static ref REPL_COMMANDS: [ReplCommand; 27] = [
         ReplCommand::new(".help", "Show this help message", AssertState::pass()),
         ReplCommand::new(".info", "View system info", AssertState::pass()),
         ReplCommand::new(".model", "Change the current LLM", AssertState::pass()),
         ReplCommand::new(
             ".prompt",
             "Create a temporary role using a prompt",
-            AssertState::False(StateFlags::SESSION | StateFlags::BOT)
+            AssertState::False(StateFlags::SESSION | StateFlags::AGENT)
         ),
         ReplCommand::new(
             ".role",
             "Switch to a specific role",
-            AssertState::False(StateFlags::SESSION | StateFlags::BOT)
+            AssertState::False(StateFlags::SESSION | StateFlags::AGENT)
         ),
         ReplCommand::new(
             ".info role",
@@ -59,7 +59,7 @@ lazy_static! {
         ),
         ReplCommand::new(
             ".session",
-            "Begin a chat session",
+            "Begin a session",
             AssertState::False(StateFlags::SESSION_EMPTY | StateFlags::SESSION),
         ),
         ReplCommand::new(
@@ -69,7 +69,12 @@ lazy_static! {
         ),
         ReplCommand::new(
             ".save session",
-            "Save the chat to file",
+            "Save the current session to file",
+            AssertState::True(StateFlags::SESSION_EMPTY | StateFlags::SESSION)
+        ),
+        ReplCommand::new(
+            ".edit session",
+            "Edit the current session with an editor",
             AssertState::True(StateFlags::SESSION_EMPTY | StateFlags::SESSION)
         ),
         ReplCommand::new(
@@ -85,7 +90,7 @@ lazy_static! {
         ReplCommand::new(
             ".rag",
             "Init or use a rag",
-            AssertState::False(StateFlags::BOT)
+            AssertState::False(StateFlags::AGENT)
         ),
         ReplCommand::new(
             ".info rag",
@@ -95,34 +100,39 @@ lazy_static! {
         ReplCommand::new(
             ".exit rag",
             "Leave the rag",
-            AssertState::TrueFalse(StateFlags::RAG, StateFlags::BOT),
+            AssertState::TrueFalse(StateFlags::RAG, StateFlags::AGENT),
         ),
-        ReplCommand::new(".bot", "Use a bot", AssertState::bare()),
+        ReplCommand::new(".agent", "Use a agent", AssertState::bare()),
         ReplCommand::new(
-            ".info bot",
-            "View bot info",
-            AssertState::True(StateFlags::BOT),
+            ".info agent",
+            "View agent info",
+            AssertState::True(StateFlags::AGENT),
         ),
         ReplCommand::new(
             ".starter",
             "Use the conversation starter",
-            AssertState::True(StateFlags::BOT)
+            AssertState::True(StateFlags::AGENT)
         ),
         ReplCommand::new(
-            ".exit bot",
-            "Leave the bot",
-            AssertState::True(StateFlags::BOT)
+            ".exit agent",
+            "Leave the agent",
+            AssertState::True(StateFlags::AGENT)
         ),
         ReplCommand::new(
             ".file",
             "Include files with the message",
             AssertState::pass()
         ),
+        ReplCommand::new(".continue", "Continue the response", AssertState::pass()),
+        ReplCommand::new(
+            ".regenerate",
+            "Regenerate the last response",
+            AssertState::pass()
+        ),
         ReplCommand::new(".set", "Adjust settings", AssertState::pass()),
         ReplCommand::new(".copy", "Copy the last response", AssertState::pass()),
         ReplCommand::new(".exit", "Exit the REPL", AssertState::pass()),
-        ReplCommand::new(".edit_last", "Edit the last response", 
-            AssertState::pass()),
+        ReplCommand::new(".edit_last", "Edit the last response", AssertState::pass()),
     ];
     static ref COMMAND_RE: Regex = Regex::new(r"^\s*(\.\S*)\s*").unwrap();
     static ref MULTILINE_RE: Regex = Regex::new(r"(?s)^\s*:::\s*(.*)\s*:::\s*$").unwrap();
@@ -212,8 +222,8 @@ impl Repl {
                         let info = self.config.read().rag_info()?;
                         println!("{}", info);
                     }
-                    Some("bot") => {
-                        let info = self.config.read().bot_info()?;
+                    Some("agent") => {
+                        let info = self.config.read().agent_info()?;
                         println!("{}", info);
                     }
                     Some(_) => unknown_command()?,
@@ -253,12 +263,12 @@ impl Repl {
                 ".rag" => {
                     Config::use_rag(&self.config, args, self.abort_signal.clone()).await?;
                 }
-                ".bot" => match args {
+                ".agent" => match args {
                     Some(name) => {
-                        Config::use_bot(&self.config, name, None, self.abort_signal.clone())
+                        Config::use_agent(&self.config, name, None, self.abort_signal.clone())
                             .await?;
                     }
-                    None => println!(r#"Usage: .bot <name>"#),
+                    None => println!(r#"Usage: .agent <name>"#),
                 },
                 ".starter" => match args {
                     Some(value) => {
@@ -266,7 +276,7 @@ impl Repl {
                         ask(&self.config, self.abort_signal.clone(), input, true).await?;
                     }
                     None => {
-                        let banner = self.config.read().bot_banner()?;
+                        let banner = self.config.read().agent_banner()?;
                         let output = format!(
                             r#"Usage: .starter <text>...
 
@@ -281,8 +291,8 @@ Tips: use <tab> to autocomplete conversation starter text.
                 },
                 ".save" => {
                     match args.map(|v| match v.split_once(' ') {
-                        Some((subcmd, args)) => (subcmd, args.trim()),
-                        None => (v, ""),
+                        Some((subcmd, args)) => (subcmd, Some(args.trim())),
+                        None => (v, None),
                     }) {
                         Some(("session", name)) => {
                             self.config.write().save_session(name)?;
@@ -291,6 +301,44 @@ Tips: use <tab> to autocomplete conversation starter text.
                             println!(r#"Usage: .save session [name]"#)
                         }
                     }
+                }
+                ".edit" => {
+                    match args.map(|v| match v.split_once(' ') {
+                        Some((subcmd, args)) => (subcmd, Some(args.trim())),
+                        None => (v, None),
+                    }) {
+                        Some(("session", _)) => {
+                            self.config.write().edit_session()?;
+                        }
+                        _ => {
+                            println!(r#"Usage: .edit session"#)
+                        }
+                    }
+                }
+                ".file" => match args {
+                    Some(args) => {
+                        let (files, text) = split_files_text(args);
+                        let files = shell_words::split(files).with_context(|| "Invalid args")?;
+                        let input = Input::from_files(&self.config, text, files, None).await?;
+                        ask(&self.config, self.abort_signal.clone(), input, true).await?;
+                    }
+                    None => println!("Usage: .file <files>... [-- <text>...]"),
+                },
+                ".continue" => {
+                    let (mut input, output) = match self.config.read().last_message.clone() {
+                        Some(v) => v,
+                        None => bail!("Unable to continue response"),
+                    };
+                    input.set_continue_output(&output);
+                    ask(&self.config, self.abort_signal.clone(), input, true).await?;
+                }
+                ".regenerate" => {
+                    let (mut input, _) = match self.config.read().last_message.clone() {
+                        Some(v) => v,
+                        None => bail!("Unable to regenerate the last response"),
+                    };
+                    input.set_regenerate();
+                    ask(&self.config, self.abort_signal.clone(), input, true).await?;
                 }
                 ".set" => match args {
                     Some(args) => {
@@ -303,17 +351,8 @@ Tips: use <tab> to autocomplete conversation starter text.
                 ".copy" => {
                     let config = self.config.read();
                     self.copy(config.last_reply())
-                        .with_context(|| "Failed to copy the last output")?;
+                        .with_context(|| "Failed to copy the last response")?;
                 }
-                ".file" => match args {
-                    Some(args) => {
-                        let (files, text) = split_files_text(args);
-                        let files = shell_words::split(files).with_context(|| "Invalid args")?;
-                        let input = Input::new(&self.config, text, files, None)?;
-                        ask(&self.config, self.abort_signal.clone(), input, true).await?;
-                    }
-                    None => println!("Usage: .file <files>... [-- <text>...]"),
-                },
                 ".exit" => match args {
                     Some("role") => {
                         self.config.write().exit_role()?;
@@ -324,8 +363,8 @@ Tips: use <tab> to autocomplete conversation starter text.
                     Some("rag") => {
                         self.config.write().exit_rag()?;
                     }
-                    Some("bot") => {
-                        self.config.write().exit_bot()?;
+                    Some("agent") => {
+                        self.config.write().exit_agent()?;
                     }
                     Some(_) => unknown_command()?,
                     None => {
@@ -340,7 +379,7 @@ Tips: use <tab> to autocomplete conversation starter text.
                 },
                 ".edit_last" => {
                     self.config.write().edit_last_message()?;
-                },
+                }
                 _ => unknown_command()?,
             },
             None => {
@@ -405,6 +444,16 @@ Type ".help" for additional help.
         );
         keybindings.add_binding(
             KeyModifiers::CONTROL,
+            KeyCode::Enter,
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        );
+        keybindings.add_binding(
+            KeyModifiers::SHIFT,
+            KeyCode::Enter,
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        );
+        keybindings.add_binding(
+            KeyModifiers::ALT,
             KeyCode::Enter,
             ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
         );
@@ -496,45 +545,41 @@ async fn ask(
         input.use_embeddings(abort_signal.clone()).await?;
     }
     while config.read().is_compressing_session() {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let client = input.create_client()?;
-    let (output, tool_call_results) =
-        send_stream(&input, client.as_ref(), config, abort_signal.clone()).await?;
 
+    let client = input.create_client()?;
+    config.write().before_chat_completion(&input)?;
+    let (output, tool_results) =
+        chat_completion_streaming(&input, client.as_ref(), config, abort_signal.clone()).await?;
     config
         .write()
-        .save_message(&mut input, &output, &tool_call_results)?;
-    config.read().maybe_copy(&output);
-    if config.write().should_compress_session() {
-        let config = config.clone();
-        let color = if config.read().light_theme {
-            Color::LightGray
-        } else {
-            Color::DarkGray
-        };
-        print!(
-            "\n📢 {}{}{}\n",
-            color.normal().paint(
-                "Session compression is being activated because the current tokens exceed `"
-            ),
-            color.italic().paint("compress_threshold"),
-            color.normal().paint("`."),
-        );
-        tokio::spawn(async move {
-            let _ = compress_session(&config).await;
-            config.write().end_compressing_session();
-        });
-    }
-    if need_send_call_results(&tool_call_results) {
+        .after_chat_completion(&input, &output, &tool_results)?;
+    if need_send_tool_results(&tool_results) {
         ask(
             config,
             abort_signal,
-            input.merge_tool_call(output, tool_call_results),
+            input.merge_tool_call(output, tool_results),
             false,
         )
         .await
     } else {
+        if config.write().should_compress_session() {
+            let config = config.clone();
+            let color = if config.read().light_theme {
+                Color::LightGray
+            } else {
+                Color::DarkGray
+            };
+            print!(
+                "\n📢 {}\n",
+                color.italic().paint("Compressing the session."),
+            );
+            tokio::spawn(async move {
+                let _ = compress_session(&config).await;
+                config.write().end_compressing_session();
+            });
+        }
         Ok(())
     }
 }

@@ -4,6 +4,7 @@ mod command;
 mod crypto;
 mod prompt_input;
 mod render_prompt;
+mod request;
 mod spinner;
 
 pub use self::abort_signal::*;
@@ -12,12 +13,17 @@ pub use self::command::*;
 pub use self::crypto::*;
 pub use self::prompt_input::*;
 pub use self::render_prompt::render_prompt;
-pub use self::spinner::run_spinner;
+pub use self::request::*;
+pub use self::spinner::{create_spinner, Spinner};
 
+use anyhow::{Context, Result};
 use fancy_regex::Regex;
 use is_terminal::IsTerminal;
 use lazy_static::lazy_static;
-use std::env;
+use std::{
+    env,
+    path::{self, Path, PathBuf},
+};
 
 lazy_static! {
     pub static ref CODE_BLOCK_RE: Regex = Regex::new(r"(?ms)```\w*(.*)```").unwrap();
@@ -151,6 +157,54 @@ pub fn dimmed_text(input: &str) -> String {
     nu_ansi_term::Style::new().dimmed().paint(input).to_string()
 }
 
+pub fn safe_join_path<T1: AsRef<Path>, T2: AsRef<Path>>(
+    base_path: T1,
+    sub_path: T2,
+) -> Option<PathBuf> {
+    let base_path = base_path.as_ref();
+    let sub_path = sub_path.as_ref();
+    if sub_path.is_absolute() {
+        return None;
+    }
+
+    let mut joined_path = PathBuf::from(base_path);
+
+    for component in sub_path.components() {
+        if path::Component::ParentDir == component {
+            return None;
+        }
+        joined_path.push(component);
+    }
+
+    if joined_path.starts_with(base_path) {
+        Some(joined_path)
+    } else {
+        None
+    }
+}
+
+pub fn set_proxy(
+    builder: reqwest::ClientBuilder,
+    proxy: Option<&String>,
+) -> Result<reqwest::ClientBuilder> {
+    let proxy = if let Some(proxy) = proxy {
+        if proxy.is_empty() || proxy == "-" {
+            return Ok(builder);
+        }
+        proxy.clone()
+    } else if let Some(proxy) = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .into_iter()
+        .find_map(|v| env::var(v).ok())
+    {
+        proxy
+    } else {
+        return Ok(builder);
+    };
+    let builder = builder
+        .proxy(reqwest::Proxy::all(&proxy).with_context(|| format!("Invalid proxy `{proxy}`"))?);
+    Ok(builder)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +214,27 @@ mod tests {
         assert!(fuzzy_match("openai:gpt-4-turbo", "gpt4"));
         assert!(fuzzy_match("openai:gpt-4-turbo", "oai4"));
         assert!(!fuzzy_match("openai:gpt-4-turbo", "4gpt"));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_safe_join_path() {
+        assert_eq!(
+            safe_join_path("/home/user/dir1", "files/file1"),
+            Some(PathBuf::from("/home/user/dir1/files/file1"))
+        );
+        assert!(safe_join_path("/home/user/dir1", "/files/file1").is_none());
+        assert!(safe_join_path("/home/user/dir1", "../file1").is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_safe_join_path() {
+        assert_eq!(
+            safe_join_path("C:\\Users\\user\\dir1", "files/file1"),
+            Some(PathBuf::from("C:\\Users\\user\\dir1\\files\\file1"))
+        );
+        assert!(safe_join_path("C:\\Users\\user\\dir1", "/files/file1").is_none());
+        assert!(safe_join_path("C:\\Users\\user\\dir1", "../file1").is_none());
     }
 }

@@ -1,46 +1,141 @@
 use super::*;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use async_recursion::async_recursion;
-use lazy_static::lazy_static;
-use std::{fs::read_to_string, path::Path};
-use which::which;
+use serde_json::Value;
+use std::{collections::HashMap, path::Path};
 
-lazy_static! {
-    static ref EXIST_PANDOC: bool = which("pandoc").is_ok();
-    static ref EXIST_PDFTOTEXT: bool = which("pdftotext").is_ok();
-}
+pub const EXTENSION_METADATA: &str = "__extension__";
 
-pub fn load(path: &str, extension: &str) -> Result<Vec<RagDocument>> {
-    match extension {
-        "docx" | "epub" => load_with_pandoc(path),
-        "pdf" => load_with_pdftotext(path),
-        _ => load_plain(path),
+pub async fn load(
+    loaders: &HashMap<String, String>,
+    path: &str,
+    extension: &str,
+) -> Result<Vec<RagDocument>> {
+    if extension == RECURSIVE_URL_LOADER {
+        let loader_command = loaders
+            .get(extension)
+            .with_context(|| format!("RAG document loader '{extension}' not configured"))?;
+        let contents = run_loader_command(path, extension, loader_command)?;
+        let output = match parse_json_documents(&contents) {
+            Some(v) => v,
+            None => vec![RagDocument::new(contents)],
+        };
+        Ok(output)
+    } else if extension == URL_LOADER {
+        let (contents, extension) = fetch(loaders, path).await?;
+        let mut metadata: RagMetadata = Default::default();
+        metadata.insert("path".into(), path.into());
+        metadata.insert(EXTENSION_METADATA.into(), extension);
+        Ok(vec![RagDocument::new(contents).with_metadata(metadata)])
+    } else {
+        match loaders.get(extension) {
+            Some(loader_command) => load_with_command(path, extension, loader_command),
+            None => load_plain(path, extension).await,
+        }
     }
 }
 
-fn load_plain(path: &str) -> Result<Vec<RagDocument>> {
-    let contents = read_to_string(path)?;
-    let document = RagDocument::new(contents);
+async fn load_plain(path: &str, extension: &str) -> Result<Vec<RagDocument>> {
+    let contents = tokio::fs::read_to_string(path).await?;
+    if extension == "json" {
+        if let Some(documents) = parse_json_documents(&contents) {
+            return Ok(documents);
+        }
+    }
+    let mut document = RagDocument::new(contents);
+    document.metadata.insert("path".into(), path.to_string());
     Ok(vec![document])
 }
 
-fn load_with_pdftotext(path: &str) -> Result<Vec<RagDocument>> {
-    if !*EXIST_PDFTOTEXT {
-        bail!("Need to install pdftotext (part of the poppler package) to load the file.")
-    }
-    let contents = run_external_tool("pdftotext", &[path, "-"])?;
-    let document = RagDocument::new(contents);
+fn load_with_command(
+    path: &str,
+    extension: &str,
+    loader_command: &str,
+) -> Result<Vec<RagDocument>> {
+    let contents = run_loader_command(path, extension, loader_command)?;
+    let mut document = RagDocument::new(contents);
+    document.metadata.insert("path".into(), path.to_string());
+    document
+        .metadata
+        .insert(EXTENSION_METADATA.into(), DEFAULT_EXTENSION.to_string());
     Ok(vec![document])
 }
 
-fn load_with_pandoc(path: &str) -> Result<Vec<RagDocument>> {
-    if !*EXIST_PANDOC {
-        bail!("Need to install pandoc to load the file.")
+fn parse_json_documents(data: &str) -> Option<Vec<RagDocument>> {
+    let value: Value = serde_json::from_str(data).ok()?;
+    let items = match value {
+        Value::Array(v) => v,
+        _ => return None,
+    };
+    if items.is_empty() {
+        return None;
     }
-    let contents = run_external_tool("pandoc", &["--to", "plain", path])?;
-    let document = RagDocument::new(contents);
-    Ok(vec![document])
+    match &items[0] {
+        Value::String(_) => {
+            let documents: Vec<_> = items
+                .into_iter()
+                .flat_map(|item| {
+                    if let Value::String(content) = item {
+                        Some(RagDocument::new(content))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            Some(documents)
+        }
+        Value::Object(obj) => {
+            let key = [
+                "page_content",
+                "pageContent",
+                "content",
+                "html",
+                "markdown",
+                "text",
+            ]
+            .into_iter()
+            .map(|v| v.to_string())
+            .find(|key| obj.get(key).and_then(|v| v.as_str()).is_some())?;
+            let documents: Vec<_> = items
+                .into_iter()
+                .flat_map(|item| {
+                    if let Value::Object(mut obj) = item {
+                        if let Some(page_content) = obj.get(&key).and_then(|v| v.as_str()) {
+                            let page_content = page_content.to_string();
+                            obj.remove(&key);
+                            let mut metadata: IndexMap<_, _> = obj
+                                .into_iter()
+                                .map(|(k, v)| {
+                                    if let Value::String(v) = v {
+                                        (k, v)
+                                    } else {
+                                        (k, v.to_string())
+                                    }
+                                })
+                                .collect();
+                            if key == "markdown" {
+                                metadata.insert(EXTENSION_METADATA.into(), "md".into());
+                            } else if key == "html" {
+                                metadata.insert(EXTENSION_METADATA.into(), "html".into());
+                            }
+                            return Some(RagDocument {
+                                page_content,
+                                metadata,
+                            });
+                        }
+                    }
+                    None
+                })
+                .collect();
+            if documents.is_empty() {
+                None
+            } else {
+                Some(documents)
+            }
+        }
+        _ => None,
+    }
 }
 
 pub fn parse_glob(path_str: &str) -> Result<(String, Vec<String>)> {
@@ -114,19 +209,6 @@ fn is_valid_extension(suffixes: Option<&Vec<String>>, path: &Path) -> bool {
     true
 }
 
-fn run_external_tool(cmd: &str, args: &[&str]) -> Result<String> {
-    let (success, stdout, stderr) = run_command_with_output(cmd, args, None)?;
-    if success {
-        return Ok(stdout);
-    }
-    let err = if !stderr.is_empty() {
-        stderr
-    } else {
-        format!("`{cmd}` exited with non-zero.")
-    };
-    bail!("{err}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +232,37 @@ mod tests {
             parse_glob("C:\\dir\\**\\*.{md,txt}").unwrap(),
             ("C:\\dir".into(), vec!["md".into(), "txt".into()])
         );
+    }
+
+    #[test]
+    fn test_parse_json_documents() {
+        let data = r#"["foo", "bar"]"#;
+        assert_eq!(
+            parse_json_documents(data).unwrap(),
+            vec![RagDocument::new("foo"), RagDocument::new("bar")]
+        );
+
+        let data = r#"[{"content": "foo"}, {"content": "bar"}]"#;
+        assert_eq!(
+            parse_json_documents(data).unwrap(),
+            vec![RagDocument::new("foo"), RagDocument::new("bar")]
+        );
+
+        let mut metadata = IndexMap::new();
+        metadata.insert("k1".into(), "1".into());
+        let data = r#"[{"k1": 1, "text": "foo" }]"#;
+        assert_eq!(
+            parse_json_documents(data).unwrap(),
+            vec![RagDocument::new("foo").with_metadata(metadata.clone())]
+        );
+
+        let data = r#""hello""#;
+        assert!(parse_json_documents(data).is_none());
+
+        let data = r#"{"key":"value"}"#;
+        assert!(parse_json_documents(data).is_none());
+
+        let data = r#"[{"key":"value"}]"#;
+        assert!(parse_json_documents(data).is_none());
     }
 }

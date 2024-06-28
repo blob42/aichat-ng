@@ -91,7 +91,8 @@ OPENAI_COMPATIBLE_PLATFORMS=( \
   octoai,meta-llama-3-8b-instruct,https://text.octoai.run/v1 \
   perplexity,llama-3-8b-instruct,https://api.perplexity.ai \
   together,meta-llama/Llama-3-8b-chat-hf,https://api.together.xyz/v1 \
-  zhipuai,glm-4,https://open.bigmodel.cn/api/paas/v4 \
+  zhipuai,glm-4-0520,https://open.bigmodel.cn/api/paas/v4 \
+  lingyiwanwu,yi-large,https://api.lingyiwanwu.com/v1 \
 )
 
 # @cmd Chat with any LLM api 
@@ -158,7 +159,11 @@ models() {
 # @flag -S --no-stream
 # @arg text~
 chat-openai-compatible() {
-    _openai_chat "$@"
+    _wrapper curl -i "$argc_api_base/chat/completions" \
+-X POST \
+-H "Content-Type: application/json" \
+-H "Authorization: Bearer $argc_api_key" \
+-d "$(_build_body openai "$@")"
 }
 
 # @cmd List models by openai-compatible api
@@ -166,6 +171,20 @@ chat-openai-compatible() {
 # @option --api-key! $$
 models-openai-compatible() {
     _openai_models
+}
+
+# @cmd Chat with azure-openai api
+# @option --api-url! $$ 
+# @option --api-key! $$
+# @option -m --model! $$
+# @flag -S --no-stream
+# @arg text~
+chat-azure-openai() {
+    _wrapper curl -i "$argc_api_url" \
+-X POST \
+-H "Content-Type: application/json" \
+-H "api-key: $argc_api_key" \
+-d "$(_build_body openai "$@")"
 }
 
 # @cmd Chat with gemini api
@@ -396,20 +415,10 @@ _argc_before() {
     fi
 }
 
-_openai_chat() {
-    api_base="${api_base:-"$argc_api_base"}"
-    api_key="${api_key:-"$argc_api_key"}"
-    _wrapper curl -i $curl_args "$api_base/chat/completions" \
--X POST \
--H "Content-Type: application/json" \
--H "Authorization: Bearer $api_key" \
--d "$(_build_body openai "$@")"
-}
-
 _openai_models() {
     api_base="${api_base:-"$argc_api_base"}"
     api_key="${api_key:-"$argc_api_key"}"
-    _wrapper curl $curl_args "$api_base/models" \
+    _wrapper curl "$api_base/models" \
 -H "Authorization: Bearer $api_key" \
 
 }

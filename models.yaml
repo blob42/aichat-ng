@@ -23,45 +23,26 @@
       output_price: 30
       supports_vision: true
       supports_function_calling: true
-    - name: gpt-4-turbo-preview
-      max_input_tokens: 128000
-      max_output_tokens: 4096
-      input_price: 10
-      output_price: 30
-      supports_function_calling: true
-    - name: gpt-4-1106-preview
-      max_input_tokens: 128000
-      max_output_tokens: 4096
-      input_price: 10
-      output_price: 30
-      supports_function_calling: true
-    - name: gpt-4
-      max_input_tokens: 8192
-      max_output_tokens: 4096
-      input_price: 30
-      output_price: 60
     - name: gpt-3.5-turbo
       max_input_tokens: 16385
       max_output_tokens: 4096
       input_price: 0.5
       output_price: 1.5
       supports_function_calling: true
-    - name: gpt-3.5-turbo-1106
-      max_input_tokens: 16385
-      max_output_tokens: 4096
-      input_price: 1
-      output_price: 2
-      supports_function_calling: true
     - name: text-embedding-3-large
-      mode: embedding
+      type: embedding
       max_input_tokens: 8191
-      default_chunk_size: 4000
-      max_concurrent_chunks: 100
+      input_price: 0.13
+      output_vector_size: 3072
+      default_chunk_size: 3000
+      max_batch_size: 100
     - name: text-embedding-3-small
-      mode: embedding
+      type: embedding
       max_input_tokens: 8191
-      default_chunk_size: 4000
-      max_concurrent_chunks: 100
+      input_price: 0.02
+      output_vector_size: 1536
+      default_chunk_size: 3000
+      max_batch_size: 100
 
 - platform: gemini 
   # docs:
@@ -92,9 +73,10 @@
       output_price: 1.5
       supports_function_calling: true
     - name: text-embedding-004
-      mode: embedding
+      type: embedding
       max_input_tokens: 2048
-      default_chunk_size: 2000
+      default_chunk_size: 1500
+      max_batch_size: 5
 
 - platform: claude
   # docs:
@@ -103,6 +85,14 @@
   # notes:
   #   - get max_output_tokens info from models doc
   models:
+    - name: claude-3-5-sonnet-20240620
+      max_input_tokens: 200000
+      max_output_tokens: 4096
+      require_max_tokens: true
+      input_price: 3
+      output_price: 15
+      supports_vision: true
+      supports_function_calling: true
     - name: claude-3-opus-20240229
       max_input_tokens: 200000
       max_output_tokens: 4096
@@ -148,88 +138,94 @@
       max_input_tokens: 64000
       input_price: 2
       output_price: 6
-      supports_function_calling: true
     - name: mistral-small-latest
       max_input_tokens: 32000
       input_price: 1
       output_price: 3
-      supports_function_calling: true
     - name: mistral-large-latest
       max_input_tokens: 32000
       input_price: 4
       output_price: 12
-      supports_function_calling: true
     - name: codestral-latest
       max_input_tokens: 32000
       input_price: 1
       output_price: 3
     - name: mistral-embed
-      mode: embedding
+      type: embedding
+      input_price: 0.1
+      output_vector_size: 1024
       max_input_tokens: 8092
-      default_chunk_size: 4000
+      default_chunk_size: 2000
 
 - platform: cohere
   # docs:
   #   - https://docs.cohere.com/docs/command-r
   #   - https://cohere.com/pricing
   #   - https://docs.cohere.com/reference/chat
-  # notes
-  #   - get max_output_tokens info from api error
   models:
     - name: command-r
       max_input_tokens: 128000
-      max_output_tokens: 4000
       input_price: 0.5
       output_price: 1.5
       supports_function_calling: true
     - name: command-r-plus
       max_input_tokens: 128000
-      max_output_tokens: 4000
       input_price: 3
       output_price: 15
       supports_function_calling: true
     - name: embed-english-v3.0
-      mode: embedding
+      type: embedding
       max_input_tokens: 512
+      input_price: 0.1
+      output_vector_size: 1024
       default_chunk_size: 1000
-      max_concurrent_chunks: 96
+      max_batch_size: 96
     - name: embed-multilingual-v3.0
-      mode: embedding
+      type: embedding
       max_input_tokens: 512
+      input_price: 0.1
+      output_vector_size: 1024
       default_chunk_size: 1000
-      max_concurrent_chunks: 96
+      max_batch_size: 96
+    - name: rerank-english-v3.0
+      type: reranker
+      max_input_tokens: 4096
+    - name: rerank-multilingual-v3.0
+      type: reranker
+      max_input_tokens: 4096
 
 - platform: perplexity
   # docs:
   #   - https://docs.perplexity.ai/docs/model-cards
   #   - https://docs.perplexity.ai/docs/pricing
   #   - https://docs.perplexity.ai/reference/post_chat_completions
-  # notes
-  #   - get max_output_tokens info from api error
   models:
     - name: llama-3-sonar-small-32k-chat
       max_input_tokens: 32768
-      max_output_tokens: 32768
+      input_price: 0.2
+      output_price: 0.2
+    - name: llama-3-sonar-small-32k-online
+      max_input_tokens: 28000
       input_price: 0.2
       output_price: 0.2
     - name: llama-3-sonar-large-32k-chat	
       max_input_tokens: 32768
-      max_output_tokens: 32768
-      input_price: 0.6
-      output_price: 0.6
+      input_price: 1
+      output_price: 1
+    - name: llama-3-sonar-large-32k-online
+      max_input_tokens: 28000
+      input_price: 1
+      output_price: 1
     - name: llama-3-8b-instruct
       max_input_tokens: 8192
-      max_output_tokens: 8192
       input_price: 0.2
       output_price: 0.2
     - name: llama-3-70b-instruct
       max_input_tokens: 8192
-      max_output_tokens: 8192
       input_price: 1
       output_price: 1
     - name: mixtral-8x7b-instruct
       max_input_tokens: 16384
-      max_output_tokens: 16384
       input_price: 0.6
       output_price: 0.6
 
@@ -239,24 +235,26 @@
   #   - https://wow.groq.com
   #   - https://console.groq.com/docs/text-chat
   # notes:
-  #   - get max_output_tokens info from playgourd
   #   - all models are free with rate limits
   models:
     - name: llama3-8b-8192
       max_input_tokens: 8192
-      max_output_tokens: 8192
       input_price: 0.05
-      output_price: 0.10
+      output_price: 0.08
+      supports_function_calling: true
     - name: llama3-70b-8192
       max_input_tokens: 8192
-      max_output_tokens: 8192
       input_price: 0.59
       output_price: 0.79
+      supports_function_calling: true
     - name: mixtral-8x7b-32768
       max_input_tokens: 32768
-      max_output_tokens: 32768
-      input_price: 0.27
-      output_price: 0.27
+      input_price: 0.24
+      output_price: 0.24
+    - name: gemma-7b-it
+      max_input_tokens: 8192
+      input_price: 0.07
+      output_price: 0.07
 
 - platform: vertexai
   # docs:
@@ -287,23 +285,34 @@
       output_price: 0.375
       supports_function_calling: true
     - name: text-embedding-004
-      mode: embedding
+      type: embedding
       max_input_tokens: 3072
-      default_chunk_size: 3000
-      max_concurrent_chunks: 5
+      input_price: 0.025
+      output_vector_size: 768
+      default_chunk_size: 1500
+      max_batch_size: 5
     - name: text-multilingual-embedding-002
-      mode: embedding
+      type: embedding
       max_input_tokens: 3072
-      default_chunk_size: 3000
-      max_concurrent_chunks: 5
+      input_price: 0.2
+      output_vector_size: 768
+      default_chunk_size: 1500
+      max_batch_size: 5
 
 - platform: vertexai-claude
   # docs:
   #   - https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/use-claude
   # notes:
   #   - get max_output_tokens info from models doc
-  #   - claude models have not been tested
   models:
+    - name: claude-3-5-sonnet@20240620
+      max_input_tokens: 200000
+      max_output_tokens: 4096
+      require_max_tokens: true
+      input_price: 3
+      output_price: 15
+      supports_vision: true
+      supports_function_calling: true
     - name: claude-3-opus@20240229
       max_input_tokens: 200000
       max_output_tokens: 4096
@@ -335,8 +344,15 @@
   #   - https://aws.amazon.com/bedrock/pricing/
   # notes:
   #   - get max_output_tokens info from playground
-  #   - claude/llama models have not been tested
   models:
+    - name: anthropic.claude-3-5-sonnet-20240620-v1:0
+      max_input_tokens: 200000
+      max_output_tokens: 4096
+      require_max_tokens: true
+      input_price: 3
+      output_price: 15
+      supports_vision: true
+      supports_function_calling: true
     - name: anthropic.claude-3-opus-20240229-v1:0
       max_input_tokens: 200000
       max_output_tokens: 4096
@@ -396,29 +412,51 @@
   # docs:
   #   - https://developers.cloudflare.com/workers-ai/models/
   #   - https://developers.cloudflare.com/workers-ai/platform/pricing/
-  # notes:
-  #   - unable to get max_output_tokens info
   models:
     - name: '@cf/meta/llama-3-8b-instruct'
-      max_input_tokens: 4096
-      max_output_tokens: 4096
+      max_input_tokens: 6144
+      max_output_tokens: 2048
       require_max_tokens: true
-    - name: '@cf/mistral/mistral-7b-instruct-v0.2-lora'
-      max_input_tokens: 4096
-      max_output_tokens: 4096
+      input_price: 0
+      output_price: 0
+    - name: '@hf/mistral/mistral-7b-instruct-v0.2'
+      max_input_tokens: 6144
+      max_output_tokens: 2048
       require_max_tokens: true
+      input_price: 0
+      output_price: 0
     - name: '@cf/qwen/qwen1.5-14b-chat-awq'
-      max_input_tokens: 4096
-      max_output_tokens: 4096
+      max_input_tokens: 6144
+      max_output_tokens: 2048
       require_max_tokens: true
+      input_price: 0
+      output_price: 0
+    - name: '@cf/google/gemma-7b-it'
+      max_input_tokens: 6144
+      max_output_tokens: 2048
+      require_max_tokens: true
+      input_price: 0
+      output_price: 0
+    - name: '@cf/baai/bge-base-en-v1.5'
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0
+      output_vector_size: 768
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: '@cf/baai/bge-large-en-v1.5'
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
 
 - platform: replicate
   # docs:
   #   - https://replicate.com/explore
   #   - https://replicate.com/pricing
   #   - https://replicate.com/docs/reference/http
-  # notes:
-  #   - max_output_tokens is required but unknown
   models:
     - name: meta/meta-llama-3-70b-instruct
       max_input_tokens: 8192
@@ -449,65 +487,80 @@
   # docs:
   #   - https://cloud.baidu.com/doc/WENXINWORKSHOP/s/Nlks5zkzu
   #   - https://cloud.baidu.com/doc/WENXINWORKSHOP/s/hlrk4akp7
-  # notes:
-  #   - get max_output_tokens info from models doc
   models:
     - name: ernie-4.0-8k-0613
-      max_input_tokens: 5120
-      max_output_tokens: 2048
-      require_max_tokens: true
+      max_input_tokens: 8192
       input_price: 16.8
       output_price: 16.8
+      supports_function_calling: true
     - name: ernie-3.5-8k-0613
-      max_input_tokens: 5120
-      max_output_tokens: 2048
-      require_max_tokens: true
+      max_input_tokens: 8192
       input_price: 1.68
       output_price: 1.68
+      supports_function_calling: true
+    - name: ernie-3.5-128k
+      max_input_tokens: 8192
+      input_price: 6.72
+      output_price: 13.44
+      supports_function_calling: true
     - name: ernie-speed-128k
-      max_input_tokens: 124000
-      max_output_tokens: 4096
-      require_max_tokens: true
+      max_input_tokens: 128000
       input_price: 0
       output_price: 0
-    - name: ernie-lite-8k
-      max_input_tokens: 7168
-      max_output_tokens: 2048
-      require_max_tokens: true
-      input_price: 0
-      output_price: 0
+    - name: bge_large_zh
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.28
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 16
+    - name: bge_large_en
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.28
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 16
+    - name: tao_8k
+      type: embedding
+      max_input_tokens: 8192
+      input_price: 0.28
+      output_vector_size: 1024
+      default_chunk_size: 2000
+      max_batch_size: 1
+    - name: bce_reranker_base
+      type: reranker
+      max_input_tokens: 1024
+      input_price: 0.28
 
 - platform: qianwen
   # docs:
   #   - https://help.aliyun.com/zh/dashscope/developer-reference/tongyiqianwen-large-language-models/
   #   - https://help.aliyun.com/zh/dashscope/developer-reference/qwen-vl-plus/
-  # notes:
-  #   - get max_output_tokens info from models doc
   models:
     - name: qwen-long
       max_input_tokens: 1000000
       input_price: 0.07
       output_price: 0.28
     - name: qwen-turbo
-      max_input_tokens: 6000
-      max_output_tokens: 1500
+      max_input_tokens: 8000
       input_price: 0.28
       output_price: 0.84
+      supports_function_calling: true
     - name: qwen-plus
-      max_input_tokens: 30000
-      max_output_tokens: 2000
+      max_input_tokens: 32000
       input_price: 0.56
       output_price: 1.68
+      supports_function_calling: true
     - name: qwen-max
-      max_input_tokens: 6000
-      max_output_tokens: 2000
+      max_input_tokens: 8000
       input_price: 5.6
       output_price: 16.8
+      supports_function_calling: true
     - name: qwen-max-longcontext
       input_price: 5.6
       output_price: 16.8
-      max_input_tokens: 28000
-      max_output_tokens: 2000
+      max_input_tokens: 30000
     - name: qwen-vl-plus
       input_price: 1.12
       output_price: 1.12
@@ -517,31 +570,34 @@
       output_price: 2.8
       supports_vision: true
     - name: text-embedding-v2
-      mode: embedding
+      type: embedding
       max_input_tokens: 2048
-      default_chunk_size: 2000
-      max_concurrent_chunks: 5
+      input_price: 0.1
+      output_vector_size: 1536
+      default_chunk_size: 1500
+      max_batch_size: 25
 
 - platform: moonshot
   # docs:
   #   - https://platform.moonshot.cn/docs/intro
   #   - https://platform.moonshot.cn/docs/pricing
   #   - https://platform.moonshot.cn/docs/api-reference
-  # notes:
-  #   - unable to get max_output_tokens info
   models:
     - name: moonshot-v1-8k
       max_input_tokens: 8000
       input_price: 1.68
       output_price: 1.68
+      supports_function_calling: true
     - name: moonshot-v1-32k
       max_input_tokens: 32000
       input_price: 3.36
       output_price: 3.36
+      supports_function_calling: true
     - name: moonshot-v1-128k
       max_input_tokens: 128000
       input_price: 8.4
       output_price: 8.4
+      supports_function_calling: true
 
 - platform: deepseek
   # docs:
@@ -587,11 +643,52 @@
       input_price: 7
       output_price: 7
       supports_vision: true
+    - name: embedding-2
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.07
+      output_vector_size: 1024
+      default_chunk_size: 1000
+
+- platform: lingyiwanwu
+  # docs:
+  #   - https://platform.lingyiwanwu.com/docs#%E6%A8%A1%E5%9E%8B
+  #   - https://platform.lingyiwanwu.com/docs#%E8%AE%A1%E8%B4%B9%E5%8D%95%E5%85%83
+  models:
+  - name: yi-large 
+    max_input_tokens: 32768
+    input_price: 2.8
+    output_price: 2.8
+  - name: yi-large-turbo
+    max_input_tokens: 16384
+    input_price: 1.68
+    output_price: 1.68
+  - name: yi-large-rag
+    max_input_tokens: 16384
+    input_price: 3.5
+    output_price: 3.5
+  - name: yi-vision
+    max_input_tokens: 4096
+    input_price: 0.84
+    output_price: 0.84
+    supports_vision: true
+  - name: yi-medium 
+    max_input_tokens: 16384
+    input_price: 0.35
+    output_price: 0.35
+  - name: yi-medium-200k
+    max_input_tokens: 200000
+    input_price: 1.68
+    output_price: 1.68
+  - name: yi-spark
+    max_input_tokens: 16384
+    input_price: 0.14
+    output_price: 0.14
 
 - platform: anyscale
   # docs:
-  #   - https://docs.anyscale.com/endpoints/text-generation/supported-models/meta-llama-Meta-Llama-3-8B-Instruct
-  #   - https://docs.endpoints.anyscale.com/pricing
+  #   - https://docs.anyscale.com/endpoints/text-generation/query-a-model
+  #   - https://www.anyscale.com/pricing-detail
   models:
     - name: meta-llama/Meta-Llama-3-8B-Instruct
       max_input_tokens: 8192
@@ -599,10 +696,6 @@
       output_price: 0.15
     - name: meta-llama/Meta-Llama-3-70B-Instruct
       max_input_tokens: 8192
-      input_price: 1.0
-      output_price: 1.0
-    - name: codellama/CodeLlama-70b-Instruct-hf
-      max_input_tokens: 4096
       input_price: 1.0
       output_price: 1.0
     - name: mistralai/Mistral-7B-Instruct-v0.1
@@ -617,6 +710,24 @@
       max_input_tokens: 65536
       input_price: 0.90
       output_price: 0.90
+    - name: google/gemma-7b-it
+      max_input_tokens: 8192
+      input_price: 0.15
+      output_price: 0.15
+    - name: BAAI/bge-large-en-v1.5
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.05
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 30
+    - name: thenlper/gte-large
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.05
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 30
 
 - platform: deepinfra
   # docs:
@@ -627,10 +738,12 @@
       max_input_tokens: 8192
       input_price: 0.08
       output_price: 0.08
+      supports_function_calling: true
     - name: meta-llama/Meta-Llama-3-70B-Instruct
       max_input_tokens: 8192
       input_price: 0.59
       output_price: 0.79
+      supports_function_calling: true
     - name: mistralai/Mistral-7B-Instruct-v0.3
       max_input_tokens: 32768
       input_price: 0.07
@@ -639,10 +752,16 @@
       max_input_tokens: 32768
       input_price: 0.24
       output_price: 0.24
+      supports_function_calling: true
     - name: mistralai/Mixtral-8x22B-Instruct-v0.1
       max_input_tokens: 65536
       input_price: 0.65
       output_price: 0.65
+      supports_function_calling: true
+    - name: google/gemma-1.1-7b-it
+      max_input_tokens: 8192
+      input_price: 0.07
+      output_price: 0.07
     - name: Qwen/Qwen2-72B-Instruct
       max_input_tokens: 32768
       input_price: 0.59
@@ -651,6 +770,62 @@
       max_input_tokens: 4096
       input_price: 0.14
       output_price: 0.14
+    - name: BAAI/bge-large-en-v1.5
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.01
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: BAAI/bge-base-en-v1.5
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.005
+      output_vector_size: 768
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: BAAI/bge-m3
+      type: embedding
+      max_input_tokens: 8192
+      input_price: 0.01
+      output_vector_size: 1024
+      default_chunk_size: 2000
+      max_batch_size: 100
+    - name: intfloat/e5-base-v2
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.005
+      output_vector_size: 768
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: intfloat/e5-large-v2
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.01
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: intfloat/multilingual-e5-large
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.01
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: thenlper/gte-base
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.005
+      output_vector_size: 768
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: thenlper/gte-large
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.01
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
 
 - platform: fireworks
   # docs:
@@ -662,7 +837,7 @@
       input_price: 0.2
       output_price: 0.2
       supports_vision: true
-    - name: accounts/fireworks/models/firefunction-v1
+    - name: accounts/fireworks/models/firefunction-v2
       max_input_tokens: 32768
       input_price: 0.2
       output_price: 0.2
@@ -687,6 +862,10 @@
       max_input_tokens: 65536
       input_price: 0.9
       output_price: 0.9
+    - name: accounts/fireworks/models/gemma-7b-it
+      max_input_tokens: 8192
+      input_price: 0.2
+      output_price: 0.2
     - name: accounts/fireworks/models/qwen2-72b-instruct
       max_input_tokens: 32768
       input_price: 0.9
@@ -700,6 +879,34 @@
       input_price: 0.2
       output_price: 0.2
       supports_vision: true
+    - name: nomic-ai/nomic-embed-text-v1.5
+      type: embedding
+      max_input_tokens: 8192
+      input_price: 0.008
+      output_vector_size: 768
+      default_chunk_size: 1500
+      max_batch_size: 100
+    - name: WhereIsAI/UAE-Large-V1
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.016
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: thenlper/gte-large
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.016
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: thenlper/gte-base
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.008
+      output_vector_size: 768
+      default_chunk_size: 1000
+      max_batch_size: 100
 
 - platform: openrouter
   # docs:
@@ -709,30 +916,22 @@
       max_input_tokens: 8192
       input_price: 0.07
       output_price: 0.07
-    - name: meta-llama/llama-3-8b-instruct:nitro
-      max_input_tokens: 8192
-      input_price: 0.2
-      output_price: 0.2
-    - name: meta-llama/llama-3-8b-instruct:extended
-      max_input_tokens: 16384
-      input_price: 0.2
-      output_price: 1.125
     - name: meta-llama/llama-3-70b-instruct
       max_input_tokens: 8192
       input_price: 0.59
       output_price: 0.79
-    - name: meta-llama/llama-3-70b-instruct:nitro
-      max_input_tokens: 8192
-      input_price: 0.9
-      output_price: 0.9
-    - name: mistralai/mistral-7b-instruct-v0.3
-      max_input_tokens: 32768
-      input_price: 0.07
-      output_price: 0.07
     - name: microsoft/phi-3-mini-128k-instruct
       max_input_tokens: 128000
       input_price: 0.1
       output_price: 0.1
+    - name: microsoft/phi-3-medium-4k-instruct
+      max_input_tokens: 4000
+      input_price: 0.14
+      output_price: 0.14
+    - name: microsoft/phi-3-medium-128k-instruct
+      max_input_tokens: 128000
+      input_price: 1
+      output_price: 1
     - name: qwen/qwen-2-72b-instruct
       max_input_tokens: 32768
       input_price: 0.9
@@ -749,15 +948,6 @@
       output_price: 30
       supports_vision: true
       supports_function_calling: true
-    - name: openai/gpt-4-turbo-preview
-      max_input_tokens: 128000
-      input_price: 10
-      output_price: 30
-      supports_function_calling: true
-    - name: openai/gpt-4
-      max_input_tokens: 8192
-      input_price: 30
-      output_price: 60
     - name: openai/gpt-3.5-turbo
       max_input_tokens: 16385
       input_price: 0.5
@@ -779,6 +969,14 @@
       max_input_tokens: 91728
       input_price: 0.125
       output_price: 0.375
+      supports_function_calling: true
+    - name: anthropic/claude-3.5-sonnet
+      max_input_tokens: 200000
+      max_output_tokens: 4096
+      require_max_tokens: true
+      input_price: 3
+      output_price: 15
+      supports_vision: true
       supports_function_calling: true
     - name: anthropic/claude-3-opus
       max_input_tokens: 200000
@@ -804,6 +1002,10 @@
       output_price: 1.25
       supports_vision: true
       supports_function_calling: true
+    - name: mistralai/mistral-7b-instruct-v0.3
+      max_input_tokens: 32768
+      input_price: 0.07
+      output_price: 0.07
     - name: mistralai/mixtral-8x7b-instruct
       max_input_tokens: 32768
       input_price: 0.24
@@ -812,17 +1014,14 @@
       max_input_tokens: 65536
       input_price: 0.65
       output_price: 0.65
-      supports_function_calling: true
     - name: mistralai/mistral-small
       max_input_tokens: 32000
       input_price: 2
       output_price: 6
-      supports_function_calling: true
     - name: mistralai/mistral-large
       max_input_tokens: 32000
       input_price: 8
       output_price: 24
-      supports_function_calling: true
     - name: cohere/command-r
       max_input_tokens: 128000
       input_price: 0.5
@@ -841,6 +1040,22 @@
       max_input_tokens: 32768
       input_price: 0.14
       output_price: 0.28
+    - name: perplexity/llama-3-sonar-small-32k-chat
+      max_input_tokens: 32768
+      input_price: 0.2
+      output_price: 0.2
+    - name: perplexity/llama-3-sonar-small-32k-online
+      max_input_tokens: 28000
+      input_price: 0.2
+      output_price: 0.2
+    - name: perplexity/llama-3-sonar-large-32k-chat
+      max_input_tokens: 32768
+      input_price: 1
+      output_price: 1
+    - name: perplexity/llama-3-sonar-large-32k-online
+      max_input_tokens: 28000
+      input_price: 1
+      output_price: 1
 
 
 - platform: octoai
@@ -868,10 +1083,18 @@
       max_input_tokens: 65536
       input_price: 0.86
       output_price: 0.86
+    - name: thenlper/gte-large
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.05
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
 
 - platform: together
   # docs:
   #   - https://docs.together.ai/docs/inference-models
+  #   - https://docs.together.ai/docs/embedding-models
   #   - https://www.together.ai/pricing
   models:
     - name: meta-llama/Llama-3-8b-chat-hf
@@ -894,7 +1117,140 @@
       max_input_tokens: 65536
       input_price: 1.2
       output_price: 1.2
+    - name: google/gemma-7b-it
+      max_input_tokens: 8192
+      input_price: 0.2
+      output_price: 0.2
     - name: Qwen/Qwen2-72B-Instruct
       max_input_tokens: 32768
       input_price: 0.9
       output_price: 0.9
+      max_batch_size: 100
+    - name: WhereIsAI/UAE-Large-V1
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.016
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: BAAI/bge-large-en-v1.5
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.016
+      output_vector_size: 1024
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: BAAI/bge-base-en-v1.5
+      type: embedding
+      max_input_tokens: 512
+      input_price: 0.008
+      output_vector_size: 768
+      default_chunk_size: 1000
+      max_batch_size: 100
+
+- platform: jina
+  # docs:
+  #   - https://jina.ai/
+  #   - https://api.jina.ai/redoc
+  models:
+    - name: jina-embeddings-v2-base-en
+      type: embedding
+      max_input_tokens: 8192
+      input_price: 0.02
+      output_vector_size: 768
+      default_chunk_size: 1500
+      max_batch_size: 100
+    - name: jina-embeddings-v2-small-en
+      type: embedding
+      max_input_tokens: 8192
+      input_price: 0.02
+      output_vector_size: 512
+      default_chunk_size: 1000
+      max_batch_size: 100
+    - name: jina-embeddings-v2-base-zsh
+      type: embedding
+      max_input_tokens: 8192
+      input_price: 0.02
+      output_vector_size: 768
+      default_chunk_size: 1500
+      max_batch_size: 100
+    - name: jina-embeddings-v2-base-code
+      type: embedding
+      max_input_tokens: 8192
+      input_price: 0.02
+      output_vector_size: 768
+      default_chunk_size: 1500
+      max_batch_size: 100
+    - name: jina-colbert-v1-en
+      type: embedding
+      max_input_tokens: 8192
+      input_price: 0.02
+      output_vector_size: 768
+      default_chunk_size: 1500
+      max_batch_size: 100
+    - name: jina-reranker-v1-base-en
+      type: reranker
+      max_input_tokens: 8192
+      input_price: 0.02
+    - name: jina-reranker-v1-turbo-en
+      type: reranker
+      max_input_tokens: 8192
+      input_price: 0.02
+    - name: jina-colbert-v1-en
+      type: reranker
+      max_input_tokens: 8192
+      input_price: 0.02
+    - name: jina-reranker-v1-base-multilingual
+      type: reranker
+      max_input_tokens: 8192
+      input_price: 0.02
+
+- platform: voyageai
+  # docs:
+  #   - https://docs.voyageai.com/docs/embeddings
+  #   - https://docs.voyageai.com/docs/pricing
+  #   - https://docs.voyageai.com/reference/embeddings-api
+  models:
+    - name: voyage-large-2-instruct
+      type: embedding
+      max_input_tokens: 16000
+      input_price: 0.12
+      output_vector_size: 1024
+      default_chunk_size: 2000
+      max_batch_size: 128
+    - name: voyage-large-2
+      type: embedding
+      max_input_tokens: 16000
+      input_price: 0.12
+      output_vector_size: 1536
+      default_chunk_size: 3000
+      max_batch_size: 128
+    - name: voyage-multilingual-2
+      type: embedding
+      max_input_tokens: 32000
+      input_price: 0.12
+      output_vector_size: 1024
+      default_chunk_size: 2000
+      max_batch_size: 128
+    - name: voyage-code-2
+      type: embedding
+      max_input_tokens: 16000
+      input_price: 0.12
+      output_vector_size: 1536
+      default_chunk_size: 3000
+      max_batch_size: 128
+    - name: voyage-2
+      type: embedding
+      max_input_tokens: 4000
+      input_price: 0.1
+      output_vector_size: 1024
+      default_chunk_size: 2000
+      max_batch_size: 128
+    - name: rerank-1
+      type: reranker
+      max_input_tokens: 8000
+      input_price: 0.05
+    - name: rerank-lite-1
+      type: reranker
+      max_input_tokens: 4000
+      input_price: 0.02

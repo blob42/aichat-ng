@@ -78,10 +78,10 @@ impl Session {
         session.name = name.to_string();
         session.path = Some(path.display().to_string());
 
-        if let Some(bot) = &config.bot {
+        if let Some(agent) = &config.agent {
             session
                 .role_prompt
-                .clone_from(&bot.definition().instructions);
+                .clone_from(&agent.definition().instructions);
         }
 
         Ok(session)
@@ -111,11 +111,9 @@ impl Session {
         self.save_session
     }
 
-    pub fn need_compress(&self, current_compress_threshold: usize) -> bool {
-        let threshold = self
-            .compress_threshold
-            .unwrap_or(current_compress_threshold);
-        threshold >= 1000 && self.tokens() > threshold
+    pub fn need_compress(&self, global_compress_threshold: usize) -> bool {
+        let threshold = self.compress_threshold.unwrap_or(global_compress_threshold);
+        threshold > 0 && self.tokens() > threshold
     }
 
     pub fn tokens(&self) -> usize {
@@ -241,10 +239,6 @@ impl Session {
         (tokens, percent)
     }
 
-    pub fn set_name(&mut self, name: &str) {
-        self.name = name.to_string();
-    }
-
     pub fn set_role(&mut self, role: Role) {
         self.model_id = role.model().id();
         self.temperature = role.temperature();
@@ -291,7 +285,7 @@ impl Session {
         self.dirty = true;
     }
 
-    pub fn exit(&mut self, sessions_dir: &Path, is_repl: bool) -> Result<()> {
+    pub fn exit(&mut self, session_dir: &Path, is_repl: bool) -> Result<()> {
         let save_session = self.save_session();
         if self.dirty && save_session != Some(false) {
             if save_session.is_none() {
@@ -305,9 +299,7 @@ impl Session {
                 if self.is_temp() {
                     self.name = Text::new("Session name:")
                         .with_validator(|input: &str| {
-                            if input == TEMP_SESSION_NAME {
-                                Ok(Validation::Invalid(format!("'{TEMP_SESSION_NAME}' is a reserved word and cannot be used as a session name").into()))
-                            } else if input.trim().is_empty() {
+                            if input.trim().is_empty() {
                                 Ok(Validation::Invalid("This field is required".into()))
                             } else {
                                 Ok(Validation::Valid)
@@ -316,25 +308,26 @@ impl Session {
                         .prompt()?;
                 }
             }
-            self.save(sessions_dir)?;
+            let session_path = session_dir.join(format!("{}.yaml", self.name()));
+            self.save(&session_path, is_repl)?;
         }
         Ok(())
     }
 
-    pub fn save(&mut self, sessions_dir: &Path) -> Result<()> {
-        let mut session_path = sessions_dir.to_path_buf();
-        session_path.push(format!("{}.yaml", self.name()));
-        if !sessions_dir.exists() {
-            create_dir_all(sessions_dir).with_context(|| {
-                format!("Failed to create session_dir '{}'", sessions_dir.display())
-            })?;
+    pub fn save(&mut self, session_path: &Path, is_repl: bool) -> Result<()> {
+        if let Some(sessions_dir) = session_path.parent() {
+            if !sessions_dir.exists() {
+                create_dir_all(sessions_dir).with_context(|| {
+                    format!("Failed to create session_dir '{}'", sessions_dir.display())
+                })?;
+            }
         }
 
         self.path = Some(session_path.display().to_string());
 
         let content = serde_yaml::to_string(&self)
             .with_context(|| format!("Failed to serde session {}", self.name))?;
-        fs::write(&session_path, content).with_context(|| {
+        fs::write(session_path, content).with_context(|| {
             format!(
                 "Failed to write session {} to {}",
                 self.name,
@@ -342,7 +335,9 @@ impl Session {
             )
         })?;
 
-        println!("✨ Saved session to '{}'", session_path.display());
+        if is_repl {
+            println!("✨ Saved session to '{}'", session_path.display());
+        }
 
         self.dirty = false;
 
@@ -357,20 +352,34 @@ impl Session {
     }
 
     pub fn add_message(&mut self, input: &Input, output: &str) -> Result<()> {
-        let mut need_add_msg = true;
-        if self.messages.is_empty() {
-            self.messages.extend(input.role().build_messages(input));
-            need_add_msg = false;
+        if input.continue_output().is_some() {
+            if let Some(message) = self.messages.last_mut() {
+                if let MessageContent::Text(text) = &mut message.content {
+                    *text = format!("{text}{output}");
+                }
+            }
+        } else if input.regenerate() {
+            if let Some(message) = self.messages.last_mut() {
+                if let MessageContent::Text(text) = &mut message.content {
+                    *text = output.to_string();
+                }
+            }
+        } else {
+            let mut need_add_msg = true;
+            if self.messages.is_empty() {
+                self.messages.extend(input.role().build_messages(input));
+                need_add_msg = false;
+            }
+            if need_add_msg {
+                self.messages
+                    .push(Message::new(MessageRole::User, input.message_content()));
+            }
+            self.data_urls.extend(input.data_urls());
+            self.messages.push(Message::new(
+                MessageRole::Assistant,
+                MessageContent::Text(output.to_string()),
+            ));
         }
-        if need_add_msg {
-            self.messages
-                .push(Message::new(MessageRole::User, input.message_content()));
-        }
-        self.data_urls.extend(input.data_urls());
-        self.messages.push(Message::new(
-            MessageRole::Assistant,
-            MessageContent::Text(output.to_string()),
-        ));
         self.dirty = true;
         Ok(())
     }
@@ -389,6 +398,12 @@ impl Session {
 
     pub fn build_messages(&self, input: &Input) -> Vec<Message> {
         let mut messages = self.messages.clone();
+        if input.continue_output().is_some() {
+            return messages;
+        } else if input.regenerate() {
+            messages.pop();
+            return messages;
+        }
         let mut need_add_msg = true;
         let len = messages.len();
         if len == 0 {
@@ -424,6 +439,10 @@ impl RoleLike for Session {
 
     fn model(&self) -> &Model {
         &self.model
+    }
+
+    fn model_mut(&mut self) -> &mut Model {
+        &mut self.model
     }
 
     fn temperature(&self) -> Option<f64> {

@@ -1,18 +1,18 @@
-mod bot;
+mod agent;
 mod input;
 mod role;
 mod session;
 
-pub use self::bot::{list_bots, Bot, BotConfig};
+pub use self::agent::{list_agents, Agent, AgentConfig};
 pub use self::input::Input;
 pub use self::role::{Role, RoleLike, CODE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE};
 use self::session::Session;
 
 use crate::client::{
-    create_client_config, list_chat_models, list_client_types, ClientConfig, Model,
-    OPENAI_COMPATIBLE_PLATFORMS,
+    create_client_config, list_chat_models, list_client_types, list_reranker_models, ClientConfig,
+    Model, OPENAI_COMPATIBLE_PLATFORMS,
 };
-use crate::function::{FunctionDeclaration, Functions, FunctionsFilter, ToolCallResult};
+use crate::function::{FunctionDeclaration, Functions, FunctionsFilter, ToolResult};
 use crate::rag::Rag;
 use crate::render::{MarkdownRender, RenderOptions};
 use crate::utils::*;
@@ -30,7 +30,7 @@ use std::{
     fs::{create_dir_all, read_dir, read_to_string, remove_file, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    process::exit,
+    process,
     sync::Arc,
 };
 use syntect::highlighting::ThemeSet;
@@ -47,10 +47,8 @@ const RAGS_DIR_NAME: &str = "rags";
 const FUNCTIONS_DIR_NAME: &str = "functions";
 const FUNCTIONS_FILE_NAME: &str = "functions.json";
 const FUNCTIONS_BIN_DIR_NAME: &str = "bin";
-const BOTS_DIR_NAME: &str = "bots";
-const BOT_DEFINITION_FILE_NAME: &str = "index.yaml";
-const BOT_EMBEDDINGS_DIR: &str = "embeddings";
-const BOT_RAG_FILE_NAME: &str = "rag.bin";
+const AGENTS_DIR_NAME: &str = "agents";
+const AGENT_RAG_FILE_NAME: &str = "rag.bin";
 
 pub const TEMP_ROLE_NAME: &str = "%%";
 pub const TEMP_RAG_NAME: &str = "temp";
@@ -63,20 +61,20 @@ const SUMMARIZE_PROMPT: &str =
 const SUMMARY_PROMPT: &str = "This is a summary of the chat history as a recap: ";
 
 const RAG_TEMPLATE: &str = r#"Use the following context as your learned knowledge, inside <context></context> XML tags.
-  <context>
-      __CONTEXT__
-  </context>
+<context>
+__CONTEXT__
+</context>
 
-  When answer to user:
-  - If you don't know, just say that you don't know.
-  - If you don't know when you are not sure, ask for clarification.
-  Avoid mentioning that you obtained the information from the context.
-  And answer according to the language of the user's question.
+When answer to user:
+- If you don't know, just say that you don't know.
+- If you don't know when you are not sure, ask for clarification.
+Avoid mentioning that you obtained the information from the context.
+And answer according to the language of the user's question.
 
-  Given the context information, answer the query.
-  Query: __INPUT__"#;
+Given the context information, answer the query.
+Query: __INPUT__"#;
 
-const LEFT_PROMPT: &str = "{color.green}{?session {?bot {bot}#}{session}{?role /}}{!session {?bot {bot}}}{role}{?rag @{rag}}{color.cyan}{?session )}{!session >}{color.reset} ";
+const LEFT_PROMPT: &str = "{color.green}{?session {?agent {agent}>}{session}{?role /}}{!session {?agent {agent}>}}{role}{?rag @{rag}}{color.cyan}{?session )}{!session >}{color.reset} ";
 const RIGHT_PROMPT: &str = "{color.purple}{?session {?consume_tokens {consume_tokens}({consume_percent}%)}{!consume_tokens {consume_tokens}}}{color.reset}";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,33 +85,46 @@ pub struct Config {
     pub model_id: String,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
+
     pub dry_run: bool,
     pub save: bool,
-    pub save_session: Option<bool>,
-    pub highlight: bool,
-    pub light_theme: bool,
+    pub keybindings: Keybindings,
+    pub buffer_editor: Option<String>,
     pub wrap: Option<String>,
     pub wrap_code: bool,
-    pub auto_copy: bool,
-    pub keybindings: Keybindings,
+
     pub prelude: Option<String>,
     pub repl_prelude: Option<String>,
-    pub buffer_editor: Option<String>,
-    pub function_calling: bool,
-    pub dangerously_functions_filter: Option<FunctionsFilter>,
-    pub bot_prelude: Option<String>,
-    pub bots: Vec<BotConfig>,
-    pub rag_embedding_model: Option<String>,
-    pub rag_chunk_size: Option<usize>,
-    pub rag_chunk_overlap: Option<usize>,
-    pub rag_top_k: usize,
-    pub rag_template: Option<String>,
+    pub agent_prelude: Option<String>,
+
+    pub save_session: Option<bool>,
     pub compress_threshold: usize,
     pub summarize_prompt: Option<String>,
     pub summary_prompt: Option<String>,
+
+    pub function_calling: bool,
+    pub dangerously_functions_filter: Option<FunctionsFilter>,
+    pub agents: Vec<AgentConfig>,
+
+    pub rag_embedding_model: Option<String>,
+    pub rag_reranker_model: Option<String>,
+    pub rag_top_k: usize,
+    pub rag_chunk_size: Option<usize>,
+    pub rag_chunk_overlap: Option<usize>,
+    pub rag_min_score_vector_search: f32,
+    pub rag_min_score_keyword_search: f32,
+    pub rag_min_score_rerank: f32,
+    #[serde(default)]
+    pub document_loaders: HashMap<String, String>,
+    pub rag_template: Option<String>,
+
+    pub highlight: bool,
+    pub light_theme: bool,
     pub left_prompt: Option<String>,
     pub right_prompt: Option<String>,
+
     pub clients: Vec<ClientConfig>,
+
     #[serde(skip)]
     pub roles: Vec<Role>,
     #[serde(skip)]
@@ -123,7 +134,7 @@ pub struct Config {
     #[serde(skip)]
     pub rag: Option<Arc<Rag>>,
     #[serde(skip)]
-    pub bot: Option<Bot>,
+    pub agent: Option<Agent>,
     #[serde(skip)]
     pub model: Model,
     #[serde(skip)]
@@ -131,7 +142,7 @@ pub struct Config {
     #[serde(skip)]
     pub working_mode: WorkingMode,
     #[serde(skip)]
-    pub last_message: Option<(Input, String, bool)>, // (input, output, is_bot)
+    pub last_message: Option<(Input, String)>,
 }
 
 impl Default for Config {
@@ -140,38 +151,50 @@ impl Default for Config {
             model_id: Default::default(),
             temperature: None,
             top_p: None,
-            save: false,
-            save_session: None,
-            highlight: true,
+
             dry_run: false,
-            light_theme: false,
+            save: false,
+            keybindings: Default::default(),
+            buffer_editor: None,
             wrap: None,
             wrap_code: false,
-            auto_copy: false,
-            keybindings: Default::default(),
+
             prelude: None,
             repl_prelude: None,
-            buffer_editor: None,
+            agent_prelude: None,
+
             function_calling: false,
             dangerously_functions_filter: None,
-            bot_prelude: None,
-            bots: vec![],
+            agents: vec![],
+
             rag_embedding_model: None,
+            rag_reranker_model: None,
+            rag_top_k: 4,
             rag_chunk_size: None,
             rag_chunk_overlap: None,
-            rag_top_k: 4,
+            rag_min_score_vector_search: 0.0,
+            rag_min_score_keyword_search: 0.0,
+            rag_min_score_rerank: 0.0,
+            document_loaders: Default::default(),
             rag_template: None,
+
+            save_session: None,
             compress_threshold: 4000,
             summarize_prompt: None,
             summary_prompt: None,
+
+            highlight: true,
+            light_theme: false,
             left_prompt: None,
             right_prompt: None,
+
             clients: vec![],
+
             roles: vec![],
             role: None,
             session: None,
             rag: None,
-            bot: None,
+            agent: None,
             model: Default::default(),
             functions: Default::default(),
             working_mode: WorkingMode::Command,
@@ -208,6 +231,7 @@ impl Config {
         config.setup_model()?;
         config.setup_highlight();
         config.setup_light_theme()?;
+        config.setup_document_loaders();
 
         Ok(config)
     }
@@ -230,60 +254,6 @@ impl Config {
         Ok(path)
     }
 
-    pub fn save_message(
-        &mut self,
-        input: &mut Input,
-        output: &str,
-        tool_call_results: &[ToolCallResult],
-    ) -> Result<()> {
-        input.clear_patch_text();
-        self.last_message = Some((input.clone(), output.to_string(), self.bot.is_some()));
-
-        if self.dry_run || output.is_empty() || !tool_call_results.is_empty() {
-            return Ok(());
-        }
-
-        if let Some(session) = input.session_mut(&mut self.session) {
-            session.add_message(input, output)?;
-            return Ok(());
-        }
-
-        if !self.save {
-            return Ok(());
-        }
-        let mut file = self.open_message_file()?;
-        if output.is_empty() || !self.save {
-            return Ok(());
-        }
-        let timestamp = now();
-        let summary = input.summary();
-        let input_markdown = input.render();
-        let scope = if self.bot.is_none() {
-            let role_name = if input.role().is_derived() {
-                None
-            } else {
-                Some(input.role().name())
-            };
-            match (role_name, input.rag_name()) {
-                (Some(role), Some(rag_name)) => format!(" ({role}#{rag_name})"),
-                (Some(role), _) => format!(" ({role})"),
-                (None, Some(rag_name)) => format!(" (#{rag_name})"),
-                _ => String::new(),
-            }
-        } else {
-            String::new()
-        };
-        let output = format!("# CHAT: {summary} [{timestamp}]{scope}\n{input_markdown}\n--------\n{output}\n--------\n\n",);
-        file.write_all(output.as_bytes())
-            .with_context(|| "Failed to save message")
-    }
-
-    pub fn maybe_copy(&self, text: &str) {
-        if self.auto_copy {
-            let _ = set_text(text);
-        }
-    }
-
     pub fn config_file() -> Result<PathBuf> {
         match env::var(get_env_name("config_file")) {
             Ok(value) => Ok(PathBuf::from(value)),
@@ -299,22 +269,22 @@ impl Config {
     }
 
     pub fn messages_file(&self) -> Result<PathBuf> {
-        match &self.bot {
+        match &self.agent {
             None => match env::var(get_env_name("messages_file")) {
                 Ok(value) => Ok(PathBuf::from(value)),
                 Err(_) => Self::local_path(MESSAGES_FILE_NAME),
             },
-            Some(bot) => Ok(Self::bot_config_dir(bot.name())?.join(MESSAGES_FILE_NAME)),
+            Some(agent) => Ok(Self::agent_config_dir(agent.name())?.join(MESSAGES_FILE_NAME)),
         }
     }
 
     pub fn sessions_dir(&self) -> Result<PathBuf> {
-        match &self.bot {
+        match &self.agent {
             None => match env::var(get_env_name("sessions_dir")) {
                 Ok(value) => Ok(PathBuf::from(value)),
                 Err(_) => Self::local_path(SESSIONS_DIR_NAME),
             },
-            Some(bot) => Ok(Self::bot_config_dir(bot.name())?.join(SESSIONS_DIR_NAME)),
+            Some(agent) => Ok(Self::agent_config_dir(agent.name())?.join(SESSIONS_DIR_NAME)),
         }
     }
 
@@ -345,45 +315,40 @@ impl Config {
     }
 
     pub fn rag_file(&self, name: &str) -> Result<PathBuf> {
-        let path = if self.bot.is_none() {
+        let path = if self.agent.is_none() {
             Self::rags_dir()?.join(format!("{name}.bin"))
         } else {
             Self::rags_dir()?
-                .join(BOTS_DIR_NAME)
+                .join(AGENTS_DIR_NAME)
                 .join(format!("{name}.bin"))
         };
         Ok(path)
     }
 
-    pub fn bots_dir() -> Result<PathBuf> {
-        match env::var(get_env_name("bots_dir")) {
+    pub fn agents_config_dir() -> Result<PathBuf> {
+        match env::var(get_env_name("agents_config_dir")) {
             Ok(value) => Ok(PathBuf::from(value)),
-            Err(_) => Self::local_path(BOTS_DIR_NAME),
+            Err(_) => Self::local_path(AGENTS_DIR_NAME),
         }
     }
 
-    pub fn bot_config_dir(name: &str) -> Result<PathBuf> {
-        Ok(Self::bots_dir()?.join(name))
+    pub fn agent_config_dir(name: &str) -> Result<PathBuf> {
+        Ok(Self::agents_config_dir()?.join(name))
     }
 
-    pub fn bot_rag_file(name: &str) -> Result<PathBuf> {
-        Ok(Self::bot_config_dir(name)?.join(BOT_RAG_FILE_NAME))
+    pub fn agent_rag_file(name: &str) -> Result<PathBuf> {
+        Ok(Self::agent_config_dir(name)?.join(AGENT_RAG_FILE_NAME))
     }
 
-    pub fn bot_source_dir(name: &str) -> Result<PathBuf> {
-        Ok(Self::functions_dir()?.join(BOTS_DIR_NAME).join(name))
+    pub fn agents_functions_dir() -> Result<PathBuf> {
+        match env::var(get_env_name("agents_functions_dir")) {
+            Ok(value) => Ok(PathBuf::from(value)),
+            Err(_) => Ok(Self::functions_dir()?.join(AGENTS_DIR_NAME)),
+        }
     }
 
-    pub fn bot_functions_file(name: &str) -> Result<PathBuf> {
-        Ok(Self::bot_source_dir(name)?.join(FUNCTIONS_FILE_NAME))
-    }
-
-    pub fn bot_definition_file(name: &str) -> Result<PathBuf> {
-        Ok(Self::bot_source_dir(name)?.join(BOT_DEFINITION_FILE_NAME))
-    }
-
-    pub fn bot_embeddings_dir(name: &str) -> Result<PathBuf> {
-        Ok(Self::bot_source_dir(name)?.join(BOT_EMBEDDINGS_DIR))
+    pub fn agent_functions_dir(name: &str) -> Result<PathBuf> {
+        Ok(Self::agents_functions_dir()?.join(name))
     }
 
     pub fn state(&self) -> StateFlags {
@@ -395,8 +360,8 @@ impl Config {
                 flags |= StateFlags::SESSION;
             }
         }
-        if self.bot.is_some() {
-            flags |= StateFlags::BOT;
+        if self.agent.is_some() {
+            flags |= StateFlags::AGENT;
         }
         if self.role.is_some() {
             flags |= StateFlags::ROLE;
@@ -410,8 +375,8 @@ impl Config {
     pub fn current_model(&self) -> &Model {
         if let Some(session) = self.session.as_ref() {
             session.model()
-        } else if let Some(bot) = self.bot.as_ref() {
-            bot.model()
+        } else if let Some(agent) = self.agent.as_ref() {
+            agent.model()
         } else if let Some(role) = self.role.as_ref() {
             role.model()
         } else {
@@ -422,8 +387,8 @@ impl Config {
     pub fn role_like_mut(&mut self) -> Option<&mut dyn RoleLike> {
         if let Some(session) = self.session.as_mut() {
             Some(session)
-        } else if let Some(bot) = self.bot.as_mut() {
-            Some(bot)
+        } else if let Some(agent) = self.agent.as_mut() {
+            Some(agent)
         } else if let Some(role) = self.role.as_mut() {
             Some(role)
         } else {
@@ -434,8 +399,8 @@ impl Config {
     pub fn extract_role(&self) -> Role {
         let mut role = if let Some(session) = self.session.as_ref() {
             session.to_role()
-        } else if let Some(bot) = self.bot.as_ref() {
-            bot.to_role()
+        } else if let Some(agent) = self.agent.as_ref() {
+            agent.to_role()
         } else if let Some(role) = self.role.as_ref() {
             role.clone()
         } else {
@@ -453,8 +418,8 @@ impl Config {
     }
 
     pub fn info(&self) -> Result<String> {
-        if let Some(bot) = &self.bot {
-            let output = bot.export()?;
+        if let Some(agent) = &self.agent {
+            let output = agent.export()?;
             if let Some(session) = &self.session {
                 let session = session
                     .export()?
@@ -495,30 +460,39 @@ impl Config {
             ),
             ("temperature", format_option_value(&role.temperature())),
             ("top_p", format_option_value(&role.top_p())),
-            ("rag_top_k", self.rag_top_k.to_string()),
-            ("function_calling", self.function_calling.to_string()),
-            ("compress_threshold", self.compress_threshold.to_string()),
             ("dry_run", self.dry_run.to_string()),
             ("save", self.save.to_string()),
-            ("save_session", format_option_value(&self.save_session)),
-            ("highlight", self.highlight.to_string()),
-            ("light_theme", self.light_theme.to_string()),
+            ("keybindings", self.keybindings.stringify().into()),
             ("wrap", wrap),
             ("wrap_code", self.wrap_code.to_string()),
-            ("auto_copy", self.auto_copy.to_string()),
-            ("keybindings", self.keybindings.stringify().into()),
-            ("prelude", format_option_value(&self.prelude)),
+            ("save_session", format_option_value(&self.save_session)),
+            ("compress_threshold", self.compress_threshold.to_string()),
+            ("function_calling", self.function_calling.to_string()),
+            (
+                "rag_reranker_model",
+                format_option_value(&self.rag_reranker_model),
+            ),
+            ("rag_top_k", self.rag_top_k.to_string()),
+            ("highlight", self.highlight.to_string()),
+            ("light_theme", self.light_theme.to_string()),
             ("config_file", display_path(&Self::config_file()?)),
             ("roles_file", display_path(&Self::roles_file()?)),
             ("functions_dir", display_path(&Self::functions_dir()?)),
+            (
+                "agents_functions_dir",
+                display_path(&Self::agents_functions_dir()?),
+            ),
+            (
+                "agents_config_dir",
+                display_path(&Self::agents_config_dir()?),
+            ),
             ("rags_dir", display_path(&Self::rags_dir()?)),
-            ("bots_dir", display_path(&Self::bots_dir()?)),
             ("sessions_dir", display_path(&self.sessions_dir()?)),
             ("messages_file", display_path(&self.messages_file()?)),
         ];
         let output = items
             .iter()
-            .map(|(name, value)| format!("{name:<20}{value}"))
+            .map(|(name, value)| format!("{name:<24}{value}"))
             .collect::<Vec<String>>()
             .join("\n");
         Ok(output)
@@ -534,7 +508,7 @@ impl Config {
         match key {
             "max_output_tokens" => {
                 let value = parse_value(value)?;
-                self.model.set_max_tokens(value, true);
+                self.set_max_output_tokens(value);
             }
             "temperature" => {
                 let value = parse_value(value)?;
@@ -543,6 +517,13 @@ impl Config {
             "top_p" => {
                 let value = parse_value(value)?;
                 self.set_top_p(value);
+            }
+            "rag_reranker_model" => {
+                self.rag_reranker_model = if value == "null" {
+                    None
+                } else {
+                    Some(value.to_string())
+                }
             }
             "rag_top_k" => {
                 if let Some(value) = parse_value(value)? {
@@ -572,10 +553,6 @@ impl Config {
             "dry_run" => {
                 let value = value.parse().with_context(|| "Invalid value")?;
                 self.dry_run = value;
-            }
-            "auto_copy" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.auto_copy = value;
             }
             _ => bail!("Unknown key `{key}`"),
         }
@@ -626,6 +603,13 @@ impl Config {
         Ok(())
     }
 
+    pub fn set_max_output_tokens(&mut self, value: Option<isize>) {
+        match self.role_like_mut() {
+            Some(role_like) => role_like.model_mut().set_max_tokens(value, true),
+            None => self.model.set_max_tokens(value, true),
+        };
+    }
+
     pub fn set_model(&mut self, model_id: &str) -> Result<()> {
         let model = Model::retrieve_chat(self, model_id)?;
         match self.role_like_mut() {
@@ -638,7 +622,8 @@ impl Config {
     }
 
     pub fn use_prompt(&mut self, prompt: &str) -> Result<()> {
-        let role = Role::new(TEMP_ROLE_NAME, prompt);
+        let mut role = Role::new(TEMP_ROLE_NAME, prompt);
+        role.set_model(&self.model);
         self.use_role_obj(role)
     }
 
@@ -648,8 +633,8 @@ impl Config {
     }
 
     pub fn use_role_obj(&mut self, role: Role) -> Result<()> {
-        if self.bot.is_some() {
-            bail!("Cannot perform this action because you are using a bot")
+        if self.agent.is_some() {
+            bail!("Cannot perform this action because you are using a agent")
         }
         if let Some(session) = self.session.as_mut() {
             session.guard_empty()?;
@@ -756,8 +741,8 @@ impl Config {
         }
         if let Some(session) = session.as_mut() {
             if session.is_empty() {
-                if let Some((input, output, is_bot)) = &self.last_message {
-                    if self.bot.is_some() == *is_bot {
+                if let Some((input, output)) = &self.last_message {
+                    if self.agent.is_some() == input.with_agent() {
                         let ans = Confirm::new(
                             "Start a session that incorporates the last question and answer?",
                         )
@@ -786,29 +771,57 @@ impl Config {
 
     pub fn exit_session(&mut self) -> Result<()> {
         if let Some(mut session) = self.session.take() {
-            let is_repl = self.working_mode == WorkingMode::Repl;
             let sessions_dir = self.sessions_dir()?;
-            session.exit(&sessions_dir, is_repl)?;
+            session.exit(&sessions_dir, self.working_mode.is_repl())?;
             self.last_message = None;
         }
         Ok(())
     }
 
-    pub fn save_session(&mut self, name: &str) -> Result<()> {
-        let sessions_dir = self.sessions_dir()?;
+    pub fn save_session(&mut self, name: Option<&str>) -> Result<()> {
+        let name = match &self.session {
+            Some(session) => match name {
+                Some(v) => v.to_string(),
+                None => session.name().to_string(),
+            },
+            None => bail!("No session"),
+        };
+        let session_path = self.session_file(&name)?;
         if let Some(session) = self.session.as_mut() {
-            if !name.is_empty() {
-                session.set_name(name);
-            }
-            session.save(&sessions_dir)?;
+            session.save(&session_path, self.working_mode.is_repl())?;
         }
+        Ok(())
+    }
+
+    pub fn edit_session(&mut self) -> Result<()> {
+        let name = match &self.session {
+            Some(session) => session.name().to_string(),
+            None => bail!("No session"),
+        };
+        let editor = match self.buffer_editor() {
+            Some(editor) => editor,
+            None => bail!("No editor, please set $EDITOR/$VISUAL."),
+        };
+        let session_path = self.session_file(&name)?;
+        self.save_session(Some(&name))?;
+        edit_file(&editor, &session_path).with_context(|| {
+            format!(
+                "Failed to edit '{}' with '{editor}'",
+                session_path.display()
+            )
+        })?;
+        self.session = Some(Session::load(self, &name, &session_path)?);
+        self.last_message = None;
         Ok(())
     }
 
     pub fn clear_session_messages(&mut self) -> Result<()> {
         if let Some(session) = self.session.as_mut() {
             session.clear_messages();
+        } else {
+            bail!("No session")
         }
+        self.last_message = None;
         Ok(())
     }
 
@@ -865,6 +878,7 @@ impl Config {
         if let Some(session) = self.session.as_mut() {
             session.set_compressing(false);
         }
+        self.last_message = None;
     }
 
     pub async fn use_rag(
@@ -872,8 +886,8 @@ impl Config {
         rag: Option<&str>,
         abort_signal: AbortSignal,
     ) -> Result<()> {
-        if config.read().bot.is_some() {
-            bail!("Cannot perform this action because you are using a bot")
+        if config.read().agent.is_some() {
+            bail!("Cannot perform this action because you are using a agent")
         }
         let rag = match rag {
             None => {
@@ -943,49 +957,52 @@ impl Config {
             .replace("__INPUT__", text)
     }
 
-    pub async fn use_bot(
+    pub async fn use_agent(
         config: &GlobalConfig,
         name: &str,
         session: Option<&str>,
         abort_signal: AbortSignal,
     ) -> Result<()> {
         if !config.read().function_calling {
-            bail!("Before using the bot, please configure function calling first.");
+            bail!("Before using the agent, please configure function calling first.");
         }
-        if config.read().bot.is_some() {
-            bail!("Already in a bot, please run '.exit bot' first to exit the current bot.");
+        if config.read().agent.is_some() {
+            bail!("Already in a agent, please run '.exit agent' first to exit the current agent.");
         }
-        let bot = Bot::init(config, name, abort_signal).await?;
-        config.write().rag = bot.rag();
-        config.write().bot = Some(bot);
+        let agent = Agent::init(config, name, abort_signal).await?;
+        config.write().rag = agent.rag();
+        config.write().agent = Some(agent);
         let session = session
             .map(|v| v.to_string())
-            .or_else(|| config.read().bot_prelude.clone());
+            .or_else(|| config.read().agent_prelude.clone());
         if let Some(session) = session {
             config.write().use_session(Some(&session))?;
         }
         Ok(())
     }
 
-    pub fn bot_info(&self) -> Result<String> {
-        if let Some(bot) = &self.bot {
-            bot.export()
+    pub fn agent_info(&self) -> Result<String> {
+        if let Some(agent) = &self.agent {
+            agent.export()
         } else {
-            bail!("No bot")
+            bail!("No agent")
         }
     }
 
-    pub fn bot_banner(&self) -> Result<String> {
-        if let Some(bot) = &self.bot {
-            Ok(bot.banner())
+    pub fn agent_banner(&self) -> Result<String> {
+        if let Some(agent) = &self.agent {
+            Ok(agent.banner())
         } else {
-            bail!("No bot")
+            bail!("No agent")
         }
     }
 
-    pub fn exit_bot(&mut self) -> Result<()> {
-        self.rag.take();
-        self.bot.take();
+    pub fn exit_agent(&mut self) -> Result<()> {
+        self.exit_session()?;
+        if self.agent.take().is_some() {
+            self.rag.take();
+            self.last_message = None;
+        }
         Ok(())
     }
 
@@ -1024,14 +1041,14 @@ impl Config {
         if self.function_calling {
             let filter = role.functions_filter();
             if let Some(filter) = filter {
-                functions = match &self.bot {
-                    Some(bot) => bot.functions().select(&filter),
+                functions = match &self.agent {
+                    Some(agent) => agent.functions().select(&filter),
                     None => self.functions.select(&filter),
                 };
                 if !model.supports_function_calling() {
                     functions = None;
                     if *IS_STDOUT_TERMINAL {
-                        eprintln!("{}", warning_text("WARNING: the role or session includes functions, but the model or client does not support function calling."));
+                        eprintln!("{}", warning_text("WARNING: This LLM or client does not support function calling, despite the context requiring it."));
                     }
                 }
             }
@@ -1043,8 +1060,8 @@ impl Config {
         if get_env_bool("no_dangerously_functions") {
             return false;
         }
-        let dangerously_functions_filter = match &self.bot {
-            Some(bot) => bot.config().dangerously_functions_filter.as_ref(),
+        let dangerously_functions_filter = match &self.agent {
+            Some(agent) => agent.config().dangerously_functions_filter.as_ref(),
             None => self.dangerously_functions_filter.as_ref(),
         };
         match dangerously_functions_filter {
@@ -1083,9 +1100,9 @@ impl Config {
                     .map(|v| (v, None))
                     .collect(),
                 ".rag" => self.list_rags().into_iter().map(|v| (v, None)).collect(),
-                ".bot" => list_bots().into_iter().map(|v| (v, None)).collect(),
-                ".starter" => match &self.bot {
-                    Some(bot) => bot
+                ".agent" => list_agents().into_iter().map(|v| (v, None)).collect(),
+                ".starter" => match &self.agent {
+                    Some(agent) => agent
                         .conversation_staters()
                         .iter()
                         .map(|v| (v.clone(), None))
@@ -1096,6 +1113,7 @@ impl Config {
                     "max_output_tokens",
                     "temperature",
                     "top_p",
+                    "rag_reranker_model",
                     "rag_top_k",
                     "function_calling",
                     "compress_threshold",
@@ -1103,7 +1121,6 @@ impl Config {
                     "save_session",
                     "highlight",
                     "dry_run",
-                    "auto_copy",
                 ]
                 .into_iter()
                 .map(|v| (format!("{v} "), None))
@@ -1117,6 +1134,7 @@ impl Config {
                     Some(v) => vec![v.to_string()],
                     None => vec![],
                 },
+                "rag_reranker_model" => list_reranker_models(self).iter().map(|v| v.id()).collect(),
                 "function_calling" => complete_bool(self.function_calling),
                 "save" => complete_bool(self.save),
                 "save_session" => {
@@ -1129,7 +1147,6 @@ impl Config {
                 }
                 "highlight" => complete_bool(self.highlight),
                 "dry_run" => complete_bool(self.dry_run),
-                "auto_copy" => complete_bool(self.auto_copy),
                 _ => vec![],
             };
             (values.into_iter().map(|v| (v, None)).collect(), args[1])
@@ -1145,7 +1162,7 @@ impl Config {
     pub fn last_reply(&self) -> &str {
         self.last_message
             .as_ref()
-            .map(|(_, reply, _)| reply.as_str())
+            .map(|(_, reply)| reply.as_str())
             .unwrap_or_default()
     }
 
@@ -1227,9 +1244,6 @@ impl Config {
                 output.insert("wrap", wrap.clone());
             }
         }
-        if self.auto_copy {
-            output.insert("auto_copy", "true".to_string());
-        }
         if !role.is_derived() {
             output.insert("role", role.name().to_string());
         }
@@ -1244,8 +1258,8 @@ impl Config {
         if let Some(rag) = &self.rag {
             output.insert("rag", rag.name().to_string());
         }
-        if let Some(bot) = &self.bot {
-            output.insert("bot", bot.name().to_string());
+        if let Some(agent) = &self.agent {
+            output.insert("agent", agent.name().to_string());
         }
 
         if self.highlight {
@@ -1271,6 +1285,64 @@ impl Config {
         }
 
         output
+    }
+
+    pub fn before_chat_completion(&mut self, input: &Input) -> Result<()> {
+        self.last_message = Some((input.clone(), String::new()));
+        Ok(())
+    }
+
+    pub fn after_chat_completion(
+        &mut self,
+        input: &Input,
+        output: &str,
+        tool_results: &[ToolResult],
+    ) -> Result<()> {
+        if self.dry_run || output.is_empty() || !tool_results.is_empty() {
+            self.last_message = None;
+            return Ok(());
+        }
+        self.last_message = Some((input.clone(), output.to_string()));
+        self.save_message(input, output)?;
+        Ok(())
+    }
+
+    fn save_message(&mut self, input: &Input, output: &str) -> Result<()> {
+        let mut input = input.clone();
+        input.clear_patch();
+        if let Some(session) = input.session_mut(&mut self.session) {
+            session.add_message(&input, output)?;
+            return Ok(());
+        }
+
+        if !self.save {
+            return Ok(());
+        }
+        let mut file = self.open_message_file()?;
+        if output.is_empty() || !self.save {
+            return Ok(());
+        }
+        let timestamp = now();
+        let summary = input.summary();
+        let input_markdown = input.render();
+        let scope = if self.agent.is_none() {
+            let role_name = if input.role().is_derived() {
+                None
+            } else {
+                Some(input.role().name())
+            };
+            match (role_name, input.rag_name()) {
+                (Some(role), Some(rag_name)) => format!(" ({role}#{rag_name})"),
+                (Some(role), _) => format!(" ({role})"),
+                (None, Some(rag_name)) => format!(" (#{rag_name})"),
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        let output = format!("# CHAT: {summary} [{timestamp}]{scope}\n{input_markdown}\n--------\n{output}\n--------\n\n",);
+        file.write_all(output.as_bytes())
+            .with_context(|| "Failed to save message")
     }
 
     fn open_message_file(&self) -> Result<File> {
@@ -1387,6 +1459,15 @@ impl Config {
         };
         Ok(())
     }
+
+    fn setup_document_loaders(&mut self) {
+        [("pdf", "pdftotext $1 -"), ("docx", "pandoc --to plain $1")]
+            .into_iter()
+            .for_each(|(k, v)| {
+                let (k, v) = (k.to_string(), v.to_string());
+                self.document_loaders.entry(k).or_insert(v);
+            });
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1417,6 +1498,15 @@ pub enum WorkingMode {
     Serve,
 }
 
+impl WorkingMode {
+    pub fn is_repl(&self) -> bool {
+        *self == WorkingMode::Repl
+    }
+    pub fn is_serve(&self) -> bool {
+        *self == WorkingMode::Serve
+    }
+}
+
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct StateFlags: u32 {
@@ -1424,7 +1514,7 @@ bitflags::bitflags! {
         const SESSION_EMPTY = 1 << 1;
         const SESSION = 1 << 2;
         const RAG = 1 << 3;
-        const BOT = 1 << 4;
+        const AGENT = 1 << 4;
     }
 }
 
@@ -1450,7 +1540,7 @@ fn create_config_file(config_path: &Path) -> Result<()> {
         .with_default(true)
         .prompt()?;
     if !ans {
-        exit(0);
+        process::exit(0);
     }
 
     let client = Select::new("Platform:", list_client_types()).prompt()?;

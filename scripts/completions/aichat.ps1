@@ -28,29 +28,30 @@ Register-ArgumentCompleter -Native -CommandName 'aichat' -ScriptBlock {
             [CompletionResult]::new('-s', '-s', [CompletionResultType]::ParameterName, 'Start or join a session')
             [CompletionResult]::new('--session', '--session', [CompletionResultType]::ParameterName, 'Start or join a session')
             [CompletionResult]::new('--save-session', '--save-session', [CompletionResultType]::ParameterName, 'Forces the session to be saved')
-            [CompletionResult]::new('-b', '-b', [CompletionResultType]::ParameterName, 'Start a bot')
-            [CompletionResult]::new('--bot', '--bot', [CompletionResultType]::ParameterName, 'Start a bot')
+            [CompletionResult]::new('-a', '-a', [CompletionResultType]::ParameterName, 'Start a agent')
+            [CompletionResult]::new('--agent', '--agent', [CompletionResultType]::ParameterName, 'Start a agent')
+            [CompletionResult]::new('-R', '-R', [CompletionResultType]::ParameterName, 'Start a RAG')
             [CompletionResult]::new('--rag', '--rag', [CompletionResultType]::ParameterName, 'Start a RAG')
-            [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Include files with the message')
-            [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Include files with the message')
-            [CompletionResult]::new('-w', '-w', [CompletionResultType]::ParameterName, 'Control text wrapping (no, auto, <max-width>)')
-            [CompletionResult]::new('--wrap', '--wrap', [CompletionResultType]::ParameterName, 'Control text wrapping (no, auto, <max-width>)')
             [CompletionResult]::new('--serve', '--serve', [CompletionResultType]::ParameterName, 'Serve the LLM API and WebAPP')
             [CompletionResult]::new('-e', '-e', [CompletionResultType]::ParameterName, 'Execute commands in natural language')
             [CompletionResult]::new('--execute', '--execute', [CompletionResultType]::ParameterName, 'Execute commands in natural language')
             [CompletionResult]::new('-c', '-c', [CompletionResultType]::ParameterName, 'Output code only')
             [CompletionResult]::new('--code', '--code', [CompletionResultType]::ParameterName, 'Output code only')
+            [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Include files with the message')
+            [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Include files with the message')
+            [CompletionResult]::new('-S', '-S', [CompletionResultType]::ParameterName, 'Turn off stream mode')
+            [CompletionResult]::new('--no-stream', '--no-stream', [CompletionResultType]::ParameterName, 'Turn off stream mode')
+            [CompletionResult]::new('-w', '-w', [CompletionResultType]::ParameterName, 'Control text wrapping (no, auto, <max-width>)')
+            [CompletionResult]::new('--wrap', '--wrap', [CompletionResultType]::ParameterName, 'Control text wrapping (no, auto, <max-width>)')
             [CompletionResult]::new('-H', '-H', [CompletionResultType]::ParameterName, 'Turn off syntax highlighting')
             [CompletionResult]::new('--no-highlight', '--no-highlight', [CompletionResultType]::ParameterName, 'Turn off syntax highlighting')
-            [CompletionResult]::new('-S', '-S', [CompletionResultType]::ParameterName, 'Turns off stream mode')
-            [CompletionResult]::new('--no-stream', '--no-stream', [CompletionResultType]::ParameterName, 'Turns off stream mode')
             [CompletionResult]::new('--light-theme', '--light-theme', [CompletionResultType]::ParameterName, 'Use light theme')
             [CompletionResult]::new('--dry-run', '--dry-run', [CompletionResultType]::ParameterName, 'Display the message without sending it')
             [CompletionResult]::new('--info', '--info', [CompletionResultType]::ParameterName, 'Display information')
-            [CompletionResult]::new('--list-models', '--list-models', [CompletionResultType]::ParameterName, 'List all available models')
+            [CompletionResult]::new('--list-models', '--list-models', [CompletionResultType]::ParameterName, 'List all available chat models')
             [CompletionResult]::new('--list-roles', '--list-roles', [CompletionResultType]::ParameterName, 'List all roles')
             [CompletionResult]::new('--list-sessions', '--list-sessions', [CompletionResultType]::ParameterName, 'List all sessions')
-            [CompletionResult]::new('--list-bots', '--list-bots', [CompletionResultType]::ParameterName, 'List all bots')
+            [CompletionResult]::new('--list-agents', '--list-agents', [CompletionResultType]::ParameterName, 'List all agents')
             [CompletionResult]::new('--list-rags', '--list-rags', [CompletionResultType]::ParameterName, 'List all RAGs')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -70,17 +71,18 @@ Register-ArgumentCompleter -Native -CommandName 'aichat' -ScriptBlock {
             $offset=1
         }
         $flag = $commandElements[$commandElements.Count-$offset].ToString()
-        if ($flag -eq "-m" -or $flag -eq "--model") {
+        dump-args $flag ($flag -eq "-R") > /tmp/file1
+        if ($flag -ceq "-m" -or $flag -eq "--model") {
             $completions = Get-AichatValues "--list-models"
-        } elseif ($flag -eq "-r" -or $flag -eq "--role") {
+        } elseif ($flag -ceq "-r" -or $flag -eq "--role") {
             $completions = Get-AichatValues "--list-roles"
-        } elseif ($flag -eq "-s" -or $flag -eq "--session") {
+        } elseif ($flag -ceq "-s" -or $flag -eq "--session") {
             $completions = Get-AichatValues "--list-sessions"
-        } elseif ($flag -eq "-b" -or $flag -eq "--bot") {
-            $completions = Get-AichatValues "--list-bots"
-        } elseif ($flag -eq "--rag") {
+        } elseif ($flag -ceq "-a" -or $flag -eq "--agent") {
+            $completions = Get-AichatValues "--list-agents"
+        } elseif ($flag -ceq "-R" -or $flag -eq "--rag") {
             $completions = Get-AichatValues "--list-rags"
-        } elseif ($flag -eq "-f" -or $flag -eq "--file") {
+        } elseif ($flag -ceq "-f" -or $flag -eq "--file") {
             $completions = @()
         }
     }

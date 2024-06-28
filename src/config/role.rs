@@ -18,6 +18,7 @@ pub const INPUT_PLACEHOLDER: &str = "__INPUT__";
 pub trait RoleLike {
     fn to_role(&self) -> Role;
     fn model(&self) -> &Model;
+    fn model_mut(&mut self) -> &mut Model;
     fn temperature(&self) -> Option<f64>;
     fn top_p(&self) -> Option<f64>;
     fn functions_filter(&self) -> Option<FunctionsFilter>;
@@ -185,7 +186,7 @@ async function timeout(ms) {
 
     pub fn build_messages(&self, input: &Input) -> Vec<Message> {
         let mut content = input.message_content();
-        if self.is_empty_prompt() {
+        let mut messages = if self.is_empty_prompt() {
             vec![Message::new(MessageRole::User, content)]
         } else if self.is_embedded_prompt() {
             content.merge_prompt(|v: &str| self.prompt.replace(INPUT_PLACEHOLDER, v));
@@ -209,7 +210,14 @@ async function timeout(ms) {
             }
             messages.push(Message::new(MessageRole::User, content));
             messages
+        };
+        if let Some(text) = input.continue_output() {
+            messages.push(Message::new(
+                MessageRole::Assistant,
+                MessageContent::Text(text.into()),
+            ));
         }
+        messages
     }
 }
 
@@ -220,6 +228,10 @@ impl RoleLike for Role {
 
     fn model(&self) -> &Model {
         &self.model
+    }
+
+    fn model_mut(&mut self) -> &mut Model {
+        &mut self.model
     }
 
     fn temperature(&self) -> Option<f64> {
@@ -235,7 +247,6 @@ impl RoleLike for Role {
     }
 
     fn set_model(&mut self, model: &Model) {
-        self.model_id = Some(model.id());
         self.model = model.clone();
     }
 

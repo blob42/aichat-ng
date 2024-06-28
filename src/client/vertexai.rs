@@ -185,7 +185,7 @@ async fn embeddings(builder: RequestBuilder) -> Result<EmbeddingsOutput> {
         catch_error(&data, status.as_u16())?;
     }
     let res_body: EmbeddingsResBody =
-        serde_json::from_value(data).context("Invalid request data")?;
+        serde_json::from_value(data).context("Invalid embeddings data")?;
     let output = res_body
         .predictions
         .into_iter()
@@ -262,7 +262,12 @@ pub fn gemini_build_chat_completions_body(
         stream: _,
     } = data;
 
-    patch_system_message(&mut messages);
+    let system_message = if model.name().starts_with("gemini-1.5-") {
+        extract_system_message(&mut messages)
+    } else {
+        patch_system_message(&mut messages);
+        None
+    };
 
     let mut network_image_urls = vec![];
     let contents: Vec<Value> = messages
@@ -295,29 +300,29 @@ pub fn gemini_build_chat_completions_body(
                             .collect();
                         vec![json!({ "role": role, "parts": parts })]
                     },
-                    MessageContent::ToolResults((tool_call_results, _)) => {
-                        let function_call_parts: Vec<Value> = tool_call_results.iter().map(|tool_call_result| {
+                    MessageContent::ToolResults((tool_results, _)) => {
+                        let model_parts: Vec<Value> = tool_results.iter().map(|tool_result| {
                             json!({
                                 "functionCall": {
-                                    "name": tool_call_result.call.name,
-                                    "args": tool_call_result.call.arguments,
+                                    "name": tool_result.call.name,
+                                    "args": tool_result.call.arguments,
                                 }
                             })
                         }).collect();
-                        let function_response_parts: Vec<Value> = tool_call_results.into_iter().map(|tool_call_result| {
+                        let function_parts: Vec<Value> = tool_results.into_iter().map(|tool_result| {
                             json!({
                                 "functionResponse": {
-                                    "name": tool_call_result.call.name,
+                                    "name": tool_result.call.name,
                                     "response": {
-                                        "name": tool_call_result.call.name,
-                                        "content": tool_call_result.output,
+                                        "name": tool_result.call.name,
+                                        "content": tool_result.output,
                                     }
                                 }
                             })
                         }).collect();
                         vec![
-                            json!({ "role": "model", "parts": function_call_parts }),
-                            json!({ "role": "function", "parts": function_response_parts }),
+                            json!({ "role": "model", "parts": model_parts }),
+                            json!({ "role": "function", "parts": function_parts }),
                         ]
                     }
                 }
@@ -333,6 +338,10 @@ pub fn gemini_build_chat_completions_body(
 
     let mut body = json!({ "contents": contents, "generationConfig": {} });
 
+    if let Some(v) = system_message {
+        body["systemInstruction"] = json!({ "parts": [{"text": v }] });
+    }
+
     if let Some(v) = model.max_tokens_param() {
         body["generationConfig"]["maxOutputTokens"] = v.into();
     }
@@ -344,7 +353,18 @@ pub fn gemini_build_chat_completions_body(
     }
 
     if let Some(functions) = functions {
-        body["tools"] = json!([{ "functionDeclarations": *functions }]);
+        // Gemini doesn't support functions with parameters that have empty properties, so we need to patch it.
+        let function_declarations: Vec<_> = functions.into_iter().map(|function| {
+            if function.parameters.is_empty_properties() {
+                json!({
+                    "name": function.name,
+                    "description": function.description,
+                })
+            } else {
+                json!(function)
+            }
+        }).collect();
+        body["tools"] = json!([{ "functionDeclarations": function_declarations }]);
     }
 
     Ok(body)

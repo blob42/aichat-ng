@@ -1,5 +1,5 @@
 use super::{
-    list_chat_models, list_embedding_models,
+    list_chat_models, list_embedding_models, list_reranker_models,
     message::{Message, MessageContent},
     EmbeddingsData,
 };
@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::utils::{estimate_token_length, format_option_value};
 
 use anyhow::{bail, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const PER_MESSAGES_TOKENS: usize = 5;
 const BASIS_TOKENS: usize = 2;
@@ -46,14 +46,21 @@ impl Model {
     pub fn retrieve_chat(config: &Config, model_id: &str) -> Result<Self> {
         match Self::find(&list_chat_models(config), model_id) {
             Some(v) => Ok(v),
-            None => bail!("Invalid model '{model_id}'"),
+            None => bail!("Invalid chat model '{model_id}'"),
         }
     }
 
     pub fn retrieve_embedding(config: &Config, model_id: &str) -> Result<Self> {
         match Self::find(&list_embedding_models(config), model_id) {
             Some(v) => Ok(v),
-            None => bail!("Invalid model '{model_id}'"),
+            None => bail!("Invalid embedding model '{model_id}'"),
+        }
+    }
+
+    pub fn retrieve_reranker(config: &Config, model_id: &str) -> Result<Self> {
+        match Self::find(&list_reranker_models(config), model_id) {
+            Some(v) => Ok(v),
+            None => bail!("Invalid reranker model '{model_id}'"),
         }
     }
 
@@ -104,8 +111,8 @@ impl Model {
         &self.data.name
     }
 
-    pub fn mode(&self) -> &str {
-        &self.data.mode
+    pub fn model_type(&self) -> &str {
+        &self.data.model_type
     }
 
     pub fn data(&self) -> &ModelData {
@@ -117,35 +124,56 @@ impl Model {
     }
 
     pub fn description(&self) -> String {
-        let ModelData {
-            max_input_tokens,
-            max_output_tokens,
-            input_price,
-            output_price,
-            supports_vision,
-            supports_function_calling,
-            ..
-        } = &self.data;
-        let max_input_tokens = format_option_value(max_input_tokens);
-        let max_output_tokens = format_option_value(max_output_tokens);
-        let input_price = format_option_value(input_price);
-        let output_price = format_option_value(output_price);
-        let mut capabilities = vec![];
-        if *supports_vision {
-            capabilities.push('👁');
-        };
-        if *supports_function_calling {
-            capabilities.push('⚒');
-        };
-        let capabilities: String = capabilities
-            .into_iter()
-            .map(|v| format!("{v} "))
-            .collect::<Vec<String>>()
-            .join("");
-        format!(
-            "{:>8} / {:>8}  |  {:>6} / {:>6}  {:>6}",
-            max_input_tokens, max_output_tokens, input_price, output_price, capabilities
-        )
+        match self.model_type() {
+            "chat" => {
+                let ModelData {
+                    max_input_tokens,
+                    max_output_tokens,
+                    input_price,
+                    output_price,
+                    supports_vision,
+                    supports_function_calling,
+                    ..
+                } = &self.data;
+                let max_input_tokens = format_option_value(max_input_tokens);
+                let max_output_tokens = format_option_value(max_output_tokens);
+                let input_price = format_option_value(input_price);
+                let output_price = format_option_value(output_price);
+                let mut capabilities = vec![];
+                if *supports_vision {
+                    capabilities.push('👁');
+                };
+                if *supports_function_calling {
+                    capabilities.push('⚒');
+                };
+                let capabilities: String = capabilities
+                    .into_iter()
+                    .map(|v| format!("{v} "))
+                    .collect::<Vec<String>>()
+                    .join("");
+                format!(
+                    "{:>8} / {:>8}  |  {:>6} / {:>6}  {:>6}",
+                    max_input_tokens, max_output_tokens, input_price, output_price, capabilities
+                )
+            }
+            "embedding" => {
+                let ModelData {
+                    max_input_tokens,
+                    input_price,
+                    output_vector_size,
+                    max_batch_size,
+                    ..
+                } = &self.data;
+                let dimension = format_option_value(output_vector_size);
+                let max_tokens = format_option_value(max_input_tokens);
+                let price = format_option_value(input_price);
+                let batch = format_option_value(max_batch_size);
+                format!(
+                    "dimension:{dimension}; max-tokens:{max_tokens}; price:{price}; batch:{batch}"
+                )
+            }
+            _ => String::new(),
+        }
     }
 
     pub fn max_input_tokens(&self) -> Option<usize> {
@@ -168,8 +196,8 @@ impl Model {
         self.data.default_chunk_size.unwrap_or(1000)
     }
 
-    pub fn max_concurrent_chunks(&self) -> usize {
-        self.data.max_concurrent_chunks.unwrap_or(1)
+    pub fn max_batch_size(&self) -> usize {
+        self.data.max_batch_size.unwrap_or(1)
     }
 
     pub fn max_tokens_param(&self) -> Option<isize> {
@@ -227,19 +255,19 @@ impl Model {
         Ok(())
     }
 
-    pub fn guard_max_concurrent_chunks(&self, data: &EmbeddingsData) -> Result<()> {
-        if data.texts.len() > self.max_concurrent_chunks() {
-            bail!("Exceed max_concurrent_chunks limit");
+    pub fn guard_max_batch_size(&self, data: &EmbeddingsData) -> Result<()> {
+        if data.texts.len() > self.max_batch_size() {
+            bail!("Exceed max_batch_size limit");
         }
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelData {
     pub name: String,
-    #[serde(default = "default_model_mode")]
-    pub mode: String,
+    #[serde(default = "default_model_type", rename = "type")]
+    pub model_type: String,
     pub max_input_tokens: Option<usize>,
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
@@ -254,8 +282,9 @@ pub struct ModelData {
     pub supports_function_calling: bool,
 
     // embedding-only properties
+    pub output_vector_size: Option<usize>,
     pub default_chunk_size: Option<usize>,
-    pub max_concurrent_chunks: Option<usize>,
+    pub max_batch_size: Option<usize>,
 }
 
 impl ModelData {
@@ -273,6 +302,6 @@ pub struct BuiltinModels {
     pub models: Vec<ModelData>,
 }
 
-fn default_model_mode() -> String {
+fn default_model_type() -> String {
     "chat".into()
 }
