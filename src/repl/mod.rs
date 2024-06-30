@@ -10,7 +10,7 @@ use crate::client::chat_completion_streaming;
 use crate::config::{AssertState, Config, GlobalConfig, Input, StateFlags};
 use crate::function::need_send_tool_results;
 use crate::render::render_error;
-use crate::utils::{create_abort_signal, set_text, temp_file, AbortSignal};
+use crate::utils::{create_abort_signal, run_command, set_text, temp_file, AbortSignal};
 
 use anyhow::{bail, Context, Result};
 use async_recursion::async_recursion;
@@ -23,7 +23,7 @@ use reedline::{
     ReedlineEvent, ReedlineMenu, ValidationResult, Validator, Vi,
 };
 use reedline::{MenuBuilder, Signal};
-use std::{env, process};
+use std::{env, fs, process};
 
 lazy_static! {
     static ref SPLIT_FILES_TEXT_ARGS_RE: Regex =
@@ -33,7 +33,7 @@ lazy_static! {
 const MENU_NAME: &str = "completion_menu";
 
 lazy_static! {
-    static ref REPL_COMMANDS: [ReplCommand; 26] = [
+    static ref REPL_COMMANDS: [ReplCommand; 27] = [
         ReplCommand::new(".help", "Show this help message", AssertState::pass()),
         ReplCommand::new(".info", "View system info", AssertState::pass()),
         ReplCommand::new(".model", "Change the current LLM", AssertState::pass()),
@@ -76,6 +76,11 @@ lazy_static! {
             ".edit session",
             "Edit the current session with an editor",
             AssertState::True(StateFlags::SESSION_EMPTY | StateFlags::SESSION)
+        ),
+        ReplCommand::new(
+            ".edit last",
+            "Edit last response from LLM",
+            AssertState::pass(),
         ),
         ReplCommand::new(
             ".clear messages",
@@ -309,8 +314,34 @@ Tips: use <tab> to autocomplete conversation starter text.
                         Some(("session", _)) => {
                             self.config.write().edit_session()?;
                         }
+                        Some(("last", _)) => {
+                            let config = self.config.read();
+                            let editor = config
+                                .buffer_editor()
+                                .context("please setup a default editor")?;
+
+                            let (mut input, _) = match config.last_message.clone() {
+                                Some(v) => v,
+                                None => bail!("Unable to edit the last response"),
+                            };
+                            let temp_file = env::temp_dir()
+                                .join(format!("aichat-{}.txt", chrono::Utc::now().timestamp()));
+                            let last_reply = config.last_reply();
+                            fs::write(&temp_file, last_reply.as_bytes())?;
+                            run_command(&editor, &[&temp_file], None)
+                                .context("could not start a buffer editor")?;
+                            let new_reply = fs::read_to_string(temp_file)
+                                .context("could not edit last response")?
+                                .trim_end()
+                                .into();
+
+                            if new_reply != last_reply {
+                                input.set_regenerate(Some(dbg!(new_reply)));
+                                ask(&self.config, self.abort_signal.clone(), input, true).await?;
+                            }
+                        }
                         _ => {
-                            println!(r#"Usage: .edit session"#)
+                            println!(r#"Usage: .edit session | last"#)
                         }
                     }
                 }
@@ -336,7 +367,7 @@ Tips: use <tab> to autocomplete conversation starter text.
                         Some(v) => v,
                         None => bail!("Unable to regenerate the last response"),
                     };
-                    input.set_regenerate();
+                    input.set_regenerate(None);
                     ask(&self.config, self.abort_signal.clone(), input, true).await?;
                 }
                 ".set" => match args {
