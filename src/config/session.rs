@@ -11,7 +11,6 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs::{self, create_dir_all, read_to_string};
 use std::path::Path;
-use std::mem;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Session {
@@ -358,10 +357,17 @@ impl Session {
                     *text = format!("{text}{output}");
                 }
             }
-        } else if input.regenerate() {
+        } else if input.regenerate().is_some() {
             if let Some(message) = self.messages.last_mut() {
                 if let MessageContent::Text(text) = &mut message.content {
-                    *text = output.to_string();
+                    match input.regenerate().unwrap() {
+                        Regenerate::Simple => {
+                            *text = output.to_string();
+                        }
+                        Regenerate::Edit(prefix) => {
+                            *text = format!("{}{}", prefix, output);
+                        }
+                    }
                 }
             }
         } else {
@@ -400,9 +406,20 @@ impl Session {
         let mut messages = self.messages.clone();
         if input.continue_output().is_some() {
             return messages;
-        } else if input.regenerate() {
-            messages.pop();
-            return messages;
+        } else if input.regenerate().is_some() {
+            match input.regenerate().unwrap() {
+                Regenerate::Simple => {
+                    messages.pop();
+                    return messages;
+                }
+                Regenerate::Edit(prefix) => {
+                    messages.push(Message::new(
+                        MessageRole::Assistant,
+                        MessageContent::Text(prefix),
+                    ));
+                    return messages;
+                }
+            }
         }
         let mut need_add_msg = true;
         let len = messages.len();
@@ -417,16 +434,6 @@ impl Session {
             messages.push(Message::new(MessageRole::User, input.message_content()));
         }
         messages
-    }
-
-    pub fn replace_last_reply(&mut self, reply: &str) {
-        let new_msg = Message{ 
-            role: MessageRole::Assistant ,
-            content: MessageContent::Text(reply.into())
-        };
-        let len = self.messages.len();
-        let _ = mem::replace(&mut self.messages[len - 1], new_msg);
-        self.dirty = true;
     }
 }
 

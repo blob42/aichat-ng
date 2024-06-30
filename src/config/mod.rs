@@ -19,12 +19,12 @@ use crate::utils::*;
 
 use anyhow::{anyhow, bail, Context, Result};
 use fancy_regex::Regex;
+use input::Regenerate;
 use inquire::{Confirm, Select};
 use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::{
     env,
     fs::{create_dir_all, read_dir, read_to_string, remove_file, File, OpenOptions},
@@ -687,32 +687,6 @@ impl Config {
         Ok(role)
     }
 
-    pub fn edit_last_message(&mut self) -> Result<()> {
-        // recover last message from llm
-        // run_command("notify-send", &["--urgency=low", &format!("{:?}", self.last_reply())], None)?;
-
-        if let Some(cmd) = self.buffer_editor() {
-            let temp_file =
-                env::temp_dir().join(format!("aichat-{}.txt", chrono::Utc::now().timestamp()));
-            fs::write(&temp_file, self.last_reply().as_bytes())?;
-            run_command(&cmd, &[&temp_file], None)?;
-            let new_reply = fs::read_to_string(temp_file)?;
-
-            if let Some((input, _, bot)) = self.last_message.clone() {
-                self.last_message = Some((input, new_reply.clone(), bot));
-            }
-
-            // if we are in a session
-            if let Some(session) = self.session.as_mut() {
-                if !session.is_empty() {
-                    session.replace_last_reply(&new_reply);
-                }
-
-            }
-        }
-        Ok(())
-    }
-
     pub fn use_session(&mut self, session_name: Option<&str>) -> Result<()> {
         if self.session.is_some() {
             bail!(
@@ -1298,12 +1272,16 @@ impl Config {
         output: &str,
         tool_results: &[ToolResult],
     ) -> Result<()> {
+        let mut output = output.to_string();
         if self.dry_run || output.is_empty() || !tool_results.is_empty() {
             self.last_message = None;
             return Ok(());
         }
+        if let Some(Regenerate::Edit(prefix)) = input.regenerate() {
+            output = format!("{}{}", prefix, output);
+        }
         self.last_message = Some((input.clone(), output.to_string()));
-        self.save_message(input, output)?;
+        self.save_message(input, &output)?;
         Ok(())
     }
 
