@@ -7,6 +7,7 @@ use crate::{
 };
 
 use anyhow::{Context, Result};
+use input::Regenerate;
 use serde::{Deserialize, Serialize};
 
 pub const SHELL_ROLE: &str = "%shell%";
@@ -215,6 +216,12 @@ async function timeout(ms) {
             messages.push(Message::new(
                 MessageRole::Assistant,
                 MessageContent::Text(text.into()),
+            ));
+        }
+        if let Some(Regenerate::Edit(prefix)) = input.regenerate() {
+            messages.push(Message::new(
+                MessageRole::Assistant,
+                MessageContent::Text(prefix),
             ));
         }
         messages

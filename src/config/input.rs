@@ -25,12 +25,21 @@ lazy_static! {
 }
 
 #[derive(Debug, Clone)]
+pub enum Regenerate {
+    // Simply regenerate last reponse
+    Simple,
+
+    // Edit LLM response
+    Edit(String),
+}
+
+#[derive(Debug, Clone)]
 pub struct Input {
     config: GlobalConfig,
     text: String,
     patched_text: Option<String>,
     continue_output: Option<String>,
-    regenerate: bool,
+    regenerate: Option<Regenerate>,
     medias: Vec<String>,
     data_urls: HashMap<String, String>,
     tool_call: Option<ToolResults>,
@@ -48,7 +57,7 @@ impl Input {
             text: text.to_string(),
             patched_text: None,
             continue_output: None,
-            regenerate: false,
+            regenerate: None,
             medias: Default::default(),
             data_urls: Default::default(),
             tool_call: None,
@@ -120,7 +129,7 @@ impl Input {
             text: texts.join("\n"),
             patched_text: None,
             continue_output: None,
-            regenerate: false,
+            regenerate: None,
             medias,
             data_urls,
             tool_call: Default::default(),
@@ -166,16 +175,20 @@ impl Input {
         self.continue_output = Some(output);
     }
 
-    pub fn regenerate(&self) -> bool {
-        self.regenerate
+    pub fn regenerate(&self) -> Option<Regenerate> {
+        self.regenerate.clone()
     }
 
-    pub fn set_regenerate(&mut self) {
+    pub fn set_regenerate(&mut self, output: Option<String>) {
         let role = self.config.read().extract_role();
         if role.name() == self.role().name() {
             self.role = role;
         }
-        self.regenerate = true;
+
+        self.regenerate = match output {
+            Some(output) => Some(Regenerate::Edit(output)),
+            None => Some(Regenerate::Simple),
+        };
     }
 
     pub async fn use_embeddings(&mut self, abort_signal: AbortSignal) -> Result<()> {

@@ -10,7 +10,7 @@ use crate::client::chat_completion_streaming;
 use crate::config::{AssertState, Config, GlobalConfig, Input, StateFlags};
 use crate::function::need_send_tool_results;
 use crate::render::render_error;
-use crate::utils::{create_abort_signal, set_text, AbortSignal};
+use crate::utils::{create_abort_signal, run_command, set_text, AbortSignal};
 
 use anyhow::{bail, Context, Result};
 use async_recursion::async_recursion;
@@ -23,7 +23,7 @@ use reedline::{
     ReedlineEvent, ReedlineMenu, ValidationResult, Validator, Vi,
 };
 use reedline::{MenuBuilder, Signal};
-use std::{env, process};
+use std::{env, fs, process};
 
 lazy_static! {
     static ref SPLIT_FILES_TEXT_ARGS_RE: Regex =
@@ -337,7 +337,7 @@ Tips: use <tab> to autocomplete conversation starter text.
                         Some(v) => v,
                         None => bail!("Unable to regenerate the last response"),
                     };
-                    input.set_regenerate();
+                    input.set_regenerate(None);
                     ask(&self.config, self.abort_signal.clone(), input, true).await?;
                 }
                 ".set" => match args {
@@ -378,7 +378,25 @@ Tips: use <tab> to autocomplete conversation starter text.
                     _ => unknown_command()?,
                 },
                 ".edit_last" => {
-                    self.config.write().edit_last_message()?;
+                    let editor = self.config.read().buffer_editor()
+                        .context("please setup a default editor")?;
+
+
+                    let (mut input, _) = match self.config.read().last_message.clone() {
+                        Some(v) => v,
+                        None => bail!("Unable to edit the last response"),
+                    };
+                    let temp_file =
+                        env::temp_dir().join(format!("aichat-{}.txt", chrono::Utc::now().timestamp()));
+                    fs::write(&temp_file, self.config.read().last_reply().as_bytes())?;
+                    run_command(&editor, &[&temp_file], None).context("could not start a buffer editor")?;
+                    let new_reply = fs::read_to_string(temp_file)
+                        .context("could not edit last response")?
+                        .trim_end().into();
+
+                    input.set_regenerate(Some(dbg!(new_reply)));
+                    ask(&self.config, self.abort_signal.clone(), input, true).await?;
+
                 }
                 _ => unknown_command()?,
             },
