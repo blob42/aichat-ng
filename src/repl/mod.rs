@@ -137,7 +137,6 @@ lazy_static! {
         ReplCommand::new(".set", "Adjust settings", AssertState::pass()),
         ReplCommand::new(".copy", "Copy the last response", AssertState::pass()),
         ReplCommand::new(".exit", "Exit the REPL", AssertState::pass()),
-        // ReplCommand::new(".edit_last", "Edit the last response", AssertState::pass()),
     ];
     static ref COMMAND_RE: Regex = Regex::new(r"^\s*(\.\S*)\s*").unwrap();
     static ref MULTILINE_RE: Regex = Regex::new(r"(?s)^\s*:::\s*(.*)\s*:::\s*$").unwrap();
@@ -408,30 +407,6 @@ Tips: use <tab> to autocomplete conversation starter text.
                     }
                     _ => unknown_command()?,
                 },
-                ".edit_last" => {
-                    let editor = self
-                        .config
-                        .read()
-                        .buffer_editor()
-                        .context("please setup a default editor")?;
-
-                    let (mut input, _) = match self.config.read().last_message.clone() {
-                        Some(v) => v,
-                        None => bail!("Unable to edit the last response"),
-                    };
-                    let temp_file = env::temp_dir()
-                        .join(format!("aichat-{}.txt", chrono::Utc::now().timestamp()));
-                    fs::write(&temp_file, self.config.read().last_reply().as_bytes())?;
-                    run_command(&editor, &[&temp_file], None)
-                        .context("could not start a buffer editor")?;
-                    let new_reply = fs::read_to_string(temp_file)
-                        .context("could not edit last response")?
-                        .trim_end()
-                        .into();
-
-                    input.set_regenerate(Some(dbg!(new_reply)));
-                    ask(&self.config, self.abort_signal.clone(), input, true).await?;
-                }
                 _ => unknown_command()?,
             },
             None => {
