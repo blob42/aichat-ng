@@ -79,6 +79,7 @@ rag_template: |
 # ---- apperence ----
 highlight: true                  # Controls syntax highlighting
 light_theme: false               # Activates a light color theme when true. env: AICHAT_LIGHT_THEME
+repl_spinner: true               # set to false to disable the spinner animation
 # Custom REPL prompt, see https://github.com/sigoden/aichat/wiki/Custom-REPL-Prompt for more details
 left_prompt:
   '{color.green}{?session {?agent {agent}>}{session}{?role /}}{!session {?agent {agent}>}}{role}{?rag @{rag}}{color.cyan}{?session )}{!session >}{color.reset} '

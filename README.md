@@ -1,20 +1,17 @@
-# AIChat: All-in-one AI CLI Tool
+# AIChatNG: All-in-one AI CLI Tool
 
-[![CI](https://github.com/sigoden/aichat/actions/workflows/ci.yaml/badge.svg)](https://github.com/sigoden/aichat/actions/workflows/ci.yaml)
-[![Crates](https://img.shields.io/crates/v/aichat.svg)](https://crates.io/crates/aichat)
-[![Discord](https://img.shields.io/discord/1226737085453701222?label=Discord)](https://discord.gg/mr3ZZUB9hG)
 
 AIChat is an all-in-one AI CLI tool featuring Chat-REPL, Shell Assistant, RAG, Tool Use, AI Agent, and More.
+
+This is a fork of [aichat](https://github.com/sigoden/aichat) with the following improvements:
+
+- Edit last the response from LLMs using `edit last` command. Similar to oobabooga and open-webui. 
 
 ## Install
 
 ### Package Managers
 
-- **Rust Developers:** `cargo install aichat`
-- **Homebrew/Linuxbrew Users:** `brew install aichat`
-- **Pacman Users**: `yay -S aichat`
-- **Windows Scoop Users:** `scoop install aichat`
-- **Android Termux Users:** `pkg install aichat`
+- **Rust Developers:** clone this repo and  run `cargo install --path .`
 
 ### Pre-built Binaries
 
@@ -161,8 +158,9 @@ AIChat supports custom dark and light themes, which highlight response text and 
 
 ## License
 
-Copyright (c) 2023-2024 aichat-developers.
+This derivative work is licensed under AGPLv3.
 
-AIChat is made available under the terms of either the MIT License or the Apache License 2.0, at your option.
+Copyright blob42.
+Credit to [aichat](https://github.com/sigoden/aichat) developers.
 
-See the LICENSE-APACHE and LICENSE-MIT files for license details.
+See the LICENSE file for more details.
