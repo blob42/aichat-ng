@@ -315,18 +315,19 @@ Tips: use <tab> to autocomplete conversation starter text.
                             self.config.write().edit_session()?;
                         }
                         Some(("last", _)) => {
-                            let config = self.config.read();
-                            let editor = config
+                            let editor = self
+                                .config
+                                .read()
                                 .buffer_editor()
                                 .context("please setup a default editor")?;
 
-                            let (mut input, _) = match config.last_message.clone() {
+                            let (mut input, _) = match self.config.read().last_message.clone() {
                                 Some(v) => v,
                                 None => bail!("Unable to edit the last response"),
                             };
                             let temp_file = env::temp_dir()
                                 .join(format!("aichat-{}.txt", chrono::Utc::now().timestamp()));
-                            let last_reply = config.last_reply();
+                            let last_reply = self.config.read().last_reply().to_string();
                             fs::write(&temp_file, last_reply.as_bytes())?;
                             run_command(&editor, &[&temp_file], None)
                                 .context("could not start a buffer editor")?;
