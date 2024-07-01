@@ -1,4 +1,4 @@
-# AIChatNG: All-in-one AI CLI Tool
+# AIChatNG: All-in-one LLM CLI Tool
 
 
 AIChat is an all-in-one AI CLI tool featuring Chat-REPL, Shell Assistant, RAG, Tool Use, AI Agent, and More.
@@ -12,10 +12,6 @@ This is a fork of [aichat](https://github.com/sigoden/aichat) with the following
 ### Package Managers
 
 - **Rust Developers:** clone this repo and  run `cargo install --path .`
-
-### Pre-built Binaries
-
-Download pre-built binaries for macOS, Linux, and Windows from [GitHub Releases](https://github.com/sigoden/aichat/releases), extract them, and add the `aichat` binary to your `$PATH`.
 
 ## Get Started
 
@@ -76,6 +72,14 @@ By default, AIChat behaves in a one-off request/response manner.
 With sessions, AIChat conducts context-aware conversations.
 
 ![aichat-session](https://github.com/sigoden/aichat/assets/4012553/1444c5c9-ea67-4ad2-80df-a76954e8cce0)
+
+### Edit LLM Answers
+
+You can edit the last LLM response using the command `.edit last` .
+
+This will open your $EDITOR/$VISUAL ( or the editor you have setup in the config ) pre filled with the last LLM reply. If you edit and save the reply it will regenerate the answer using your modification as prefix to the LLM reply.
+
+You can use this feature to steer the LLM replies. This is similar to the feature `edit` feature in **text-generation-webui** or **open-webui**. 
 
 ### Retrieval-Augmented Generation (RAG)
 
