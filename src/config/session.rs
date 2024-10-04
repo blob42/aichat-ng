@@ -9,7 +9,7 @@ use inquire::{validator::Validation, Confirm, Text};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::fs::{self, create_dir_all, read_to_string};
+use std::fs::{read_to_string, write};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -21,7 +21,7 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    functions_filter: Option<FunctionsFilter>,
+    use_tools: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     save_session: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,15 +51,10 @@ pub struct Session {
 
 impl Session {
     pub fn new(config: &Config, name: &str) -> Self {
-        let save_session = if name == TEMP_SESSION_NAME {
-            None
-        } else {
-            config.save_session
-        };
         let role = config.extract_role();
         let mut session = Self {
             name: name.to_string(),
-            save_session,
+            save_session: config.save_session,
             ..Default::default()
         };
         session.set_role(role);
@@ -84,10 +79,6 @@ impl Session {
         }
 
         Ok(session)
-    }
-
-    pub fn is_temp(&self) -> bool {
-        self.name == TEMP_SESSION_NAME
     }
 
     pub fn is_empty(&self) -> bool {
@@ -134,8 +125,8 @@ impl Session {
         if let Some(top_p) = self.top_p() {
             data["top_p"] = top_p.into();
         }
-        if let Some(functions_filter) = self.functions_filter() {
-            data["functions_filter"] = functions_filter.into();
+        if let Some(use_tools) = self.use_tools() {
+            data["use_tools"] = use_tools.into();
         }
         if let Some(save_session) = self.save_session() {
             data["save_session"] = save_session.into();
@@ -171,8 +162,8 @@ impl Session {
             items.push(("top_p", top_p.to_string()));
         }
 
-        if let Some(functions_filter) = self.functions_filter() {
-            items.push(("functions_filter", functions_filter));
+        if let Some(use_tools) = self.use_tools() {
+            items.push(("use_tools", use_tools));
         }
 
         if let Some(save_session) = self.save_session() {
@@ -192,8 +183,9 @@ impl Session {
             .map(|(name, value)| format!("{name:<20}{value}"))
             .collect();
 
+        lines.push(String::new());
+
         if !self.is_empty() {
-            lines.push("".into());
             let resolve_url_fn = |url: &str| resolve_data_url(&self.data_urls, url.to_string());
 
             for message in &self.messages {
@@ -218,12 +210,7 @@ impl Session {
             }
         }
 
-        if lines.last() == Some(&String::new()) {
-            lines.pop();
-        }
-
-        let output = lines.join("\n");
-        Ok(output)
+        Ok(lines.join("\n"))
     }
 
     pub fn tokens_usage(&self) -> (usize, f32) {
@@ -242,11 +229,15 @@ impl Session {
         self.model_id = role.model().id();
         self.temperature = role.temperature();
         self.top_p = role.top_p();
-        self.functions_filter = role.functions_filter();
+        self.use_tools = role.use_tools();
         self.model = role.model().clone();
         self.role_name = role.name().to_string();
         self.role_prompt = role.prompt().to_string();
         self.dirty = true;
+    }
+
+    pub fn update_role_prompt(&mut self, prompt: &str) {
+        self.role_prompt = prompt.to_string();
     }
 
     pub fn clear_role(&mut self) {
@@ -275,7 +266,18 @@ impl Session {
         self.compressing = compressing;
     }
 
-    pub fn compress(&mut self, prompt: String) {
+    pub fn compress(&mut self, mut prompt: String) {
+        if let Some(system_prompt) = self.messages.first().and_then(|v| {
+            if MessageRole::System == v.role {
+                let content = v.content.to_text();
+                if !content.is_empty() {
+                    return Some(content);
+                }
+            }
+            None
+        }) {
+            prompt = format!("{system_prompt}\n\n{prompt}",);
+        }
         self.compressed_messages.append(&mut self.messages);
         self.messages.push(Message::new(
             MessageRole::System,
@@ -287,6 +289,7 @@ impl Session {
     pub fn exit(&mut self, session_dir: &Path, is_repl: bool) -> Result<()> {
         let save_session = self.save_session();
         if self.dirty && save_session != Some(false) {
+            let mut session_name = self.name().to_string();
             if save_session.is_none() {
                 if !is_repl {
                     return Ok(());
@@ -295,40 +298,41 @@ impl Session {
                 if !ans {
                     return Ok(());
                 }
-                if self.is_temp() {
-                    self.name = Text::new("Session name:")
+                if session_name == TEMP_SESSION_NAME {
+                    session_name = Text::new("Session name:")
                         .with_validator(|input: &str| {
-                            if input.trim().is_empty() {
-                                Ok(Validation::Invalid("This field is required".into()))
+                            let input = input.trim();
+                            if input.is_empty() {
+                                Ok(Validation::Invalid("This name is required".into()))
+                            } else if input == TEMP_SESSION_NAME {
+                                Ok(Validation::Invalid("This name is reserved".into()))
                             } else {
                                 Ok(Validation::Valid)
                             }
                         })
                         .prompt()?;
                 }
+            } else if save_session == Some(true) && session_name == TEMP_SESSION_NAME {
+                let now = chrono::Local::now();
+                let formatted_time = now.format("%Y%m%dT%H:%M:%S").to_string();
+                session_name = format!("{TEMP_SESSION_NAME}-{formatted_time}");
             }
-            let session_path = session_dir.join(format!("{}.yaml", self.name()));
-            self.save(&session_path, is_repl)?;
+            let session_path = session_dir.join(format!("{session_name}.yaml"));
+            self.save(&session_name, &session_path, is_repl)?;
         }
         Ok(())
     }
 
-    pub fn save(&mut self, session_path: &Path, is_repl: bool) -> Result<()> {
-        if let Some(sessions_dir) = session_path.parent() {
-            if !sessions_dir.exists() {
-                create_dir_all(sessions_dir).with_context(|| {
-                    format!("Failed to create session_dir '{}'", sessions_dir.display())
-                })?;
-            }
-        }
+    pub fn save(&mut self, session_name: &str, session_path: &Path, is_repl: bool) -> Result<()> {
+        ensure_parent_exists(session_path)?;
 
         self.path = Some(session_path.display().to_string());
 
         let content = serde_yaml::to_string(&self)
-            .with_context(|| format!("Failed to serde session {}", self.name))?;
-        fs::write(session_path, content).with_context(|| {
+            .with_context(|| format!("Failed to serde session '{}'", self.name))?;
+        write(session_path, content).with_context(|| {
             format!(
-                "Failed to write session {} to {}",
+                "Failed to write session '{}' to '{}'",
                 self.name,
                 session_path.display()
             )
@@ -338,6 +342,10 @@ impl Session {
             println!("✨ Saved session to '{}'", session_path.display());
         }
 
+        if self.name() != session_name {
+            self.name = session_name.to_string()
+        }
+
         self.dirty = false;
 
         Ok(())
@@ -345,7 +353,7 @@ impl Session {
 
     pub fn guard_empty(&self) -> Result<()> {
         if !self.is_empty() {
-            bail!("Cannot perform this action in a session with messages")
+            bail!("This action cannot be performed in a session with messages.")
         }
         Ok(())
     }
@@ -427,8 +435,13 @@ impl Session {
             messages = input.role().build_messages(input);
             need_add_msg = false;
         } else if len == 1 && self.compressed_messages.len() >= 2 {
-            messages
-                .extend(self.compressed_messages[self.compressed_messages.len() - 2..].to_vec());
+            if let Some(index) = self
+                .compressed_messages
+                .iter()
+                .rposition(|v| v.role == MessageRole::User)
+            {
+                messages.extend(self.compressed_messages[index..].to_vec());
+            }
         }
         if need_add_msg {
             messages.push(Message::new(MessageRole::User, input.message_content()));
@@ -460,8 +473,8 @@ impl RoleLike for Session {
         self.top_p
     }
 
-    fn functions_filter(&self) -> Option<FunctionsFilter> {
-        self.functions_filter.clone()
+    fn use_tools(&self) -> Option<String> {
+        self.use_tools.clone()
     }
 
     fn set_model(&mut self, model: &Model) {
@@ -486,9 +499,9 @@ impl RoleLike for Session {
         }
     }
 
-    fn set_functions_filter(&mut self, value: Option<FunctionsFilter>) {
-        if self.functions_filter != value {
-            self.functions_filter = value;
+    fn set_use_tools(&mut self, value: Option<String>) {
+        if self.use_tools != value {
+            self.use_tools = value;
             self.dirty = true;
         }
     }

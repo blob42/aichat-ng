@@ -3,15 +3,13 @@ use super::*;
 use crate::{
     config::{GlobalConfig, Input},
     function::{eval_tool_calls, FunctionDeclaration, ToolCall, ToolResult},
-    render::{render_error, render_stream},
+    render::render_stream,
     utils::*,
 };
 
 use anyhow::{bail, Context, Result};
-use async_trait::async_trait;
 use fancy_regex::Regex;
 use indexmap::IndexMap;
-use lazy_static::lazy_static;
 use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -20,311 +18,18 @@ use tokio::sync::mpsc::unbounded_channel;
 
 const MODELS_YAML: &str = include_str!("../../models.yaml");
 
-lazy_static! {
+lazy_static::lazy_static! {
     pub static ref ALL_MODELS: Vec<BuiltinModels> = serde_yaml::from_str(MODELS_YAML).unwrap();
     static ref ESCAPE_SLASH_RE: Regex = Regex::new(r"(?<!\\)/").unwrap();
 }
 
-#[macro_export]
-macro_rules! register_client {
-    (
-        $(($module:ident, $name:literal, $config:ident, $client:ident),)+
-    ) => {
-        $(
-            mod $module;
-        )+
-        $(
-            use self::$module::$config;
-        )+
-
-        #[derive(Debug, Clone, serde::Deserialize)]
-        #[serde(tag = "type")]
-        pub enum ClientConfig {
-            $(
-                #[serde(rename = $name)]
-                $config($config),
-            )+
-            #[serde(other)]
-            Unknown,
-        }
-
-        $(
-            #[derive(Debug)]
-            pub struct $client {
-                global_config: $crate::config::GlobalConfig,
-                config: $config,
-                model: $crate::client::Model,
-            }
-
-            impl $client {
-                pub const NAME: &'static str = $name;
-
-                pub fn init(global_config: &$crate::config::GlobalConfig, model: &$crate::client::Model) -> Option<Box<dyn Client>> {
-                    let config = global_config.read().clients.iter().find_map(|client_config| {
-                        if let ClientConfig::$config(c) = client_config {
-                            if Self::name(c) == model.client_name() {
-                                return Some(c.clone())
-                            }
-                        }
-                        None
-                    })?;
-
-                    Some(Box::new(Self {
-                        global_config: global_config.clone(),
-                        config,
-                        model: model.clone(),
-                    }))
-                }
-
-                pub fn list_models(local_config: &$config) -> Vec<Model> {
-                    let client_name = Self::name(local_config);
-                    if local_config.models.is_empty() {
-                        if let Some(models) = $crate::client::ALL_MODELS.iter().find(|v| {
-                            v.platform == $name ||
-                                ($name == OpenAICompatibleClient::NAME && local_config.name.as_deref() == Some(&v.platform)) ||
-                                ($name == RagDedicatedClient::NAME && local_config.name.as_deref() == Some(&v.platform))
-                        }) {
-                            return Model::from_config(client_name, &models.models);
-                        }
-                        vec![]
-                    } else {
-                        Model::from_config(client_name, &local_config.models)
-                    }
-                }
-
-                pub fn name(local_config: &$config) -> &str {
-                    local_config.name.as_deref().unwrap_or(Self::NAME)
-                }
-            }
-
-        )+
-
-        pub fn init_client(config: &$crate::config::GlobalConfig, model: Option<$crate::client::Model>) -> anyhow::Result<Box<dyn Client>> {
-            let model = model.unwrap_or_else(|| config.read().model.clone());
-            None
-            $(.or_else(|| $client::init(config, &model)))+
-            .ok_or_else(|| {
-                anyhow::anyhow!("Unknown client '{}'", model.client_name())
-            })
-        }
-
-        pub fn list_client_types() -> Vec<&'static str> {
-            let mut client_types: Vec<_> = vec![$($client::NAME,)+];
-            client_types.extend($crate::client::OPENAI_COMPATIBLE_PLATFORMS.iter().map(|(name, _)| *name));
-            client_types
-        }
-
-        pub fn create_client_config(client: &str) -> anyhow::Result<(String, serde_json::Value)> {
-            $(
-                if client == $client::NAME {
-                    return create_config(&$client::PROMPTS, $client::NAME)
-                }
-            )+
-            if let Some(ret) = create_openai_compatible_client_config(client)? {
-                return Ok(ret);
-            }
-            anyhow::bail!("Unknown client '{}'", client)
-        }
-
-        static mut ALL_CLIENT_MODELS: Option<Vec<$crate::client::Model>> = None;
-
-        pub fn list_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            if unsafe { ALL_CLIENT_MODELS.is_none() } {
-                let models: Vec<_> = config
-                    .clients
-                    .iter()
-                    .flat_map(|v| match v {
-                        $(ClientConfig::$config(c) => $client::list_models(c),)+
-                        ClientConfig::Unknown => vec![],
-                    })
-                    .collect();
-                unsafe { ALL_CLIENT_MODELS = Some(models) };
-            }
-            unsafe { ALL_CLIENT_MODELS.as_ref().unwrap().iter().collect() }
-        }
-
-        pub fn list_chat_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            list_models(config).into_iter().filter(|v| v.model_type() == "chat").collect()
-        }
-
-        pub fn list_embedding_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            list_models(config).into_iter().filter(|v| v.model_type() == "embedding").collect()
-        }
-
-        pub fn list_reranker_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            list_models(config).into_iter().filter(|v| v.model_type() == "reranker").collect()
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! client_common_fns {
-    () => {
-        fn global_config(&self) -> &$crate::config::GlobalConfig {
-            &self.global_config
-        }
-
-        fn extra_config(&self) -> Option<&$crate::client::ExtraConfig> {
-            self.config.extra.as_ref()
-        }
-
-        fn patches_config(&self) -> Option<&$crate::client::ModelPatches> {
-            self.config.patches.as_ref()
-        }
-
-        fn name(&self) -> &str {
-            Self::name(&self.config)
-        }
-
-        fn model(&self) -> &Model {
-            &self.model
-        }
-
-        fn model_mut(&mut self) -> &mut Model {
-            &mut self.model
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! impl_client_trait {
-    ($client:ident, $chat_completions:path, $chat_completions_streaming:path) => {
-        #[async_trait::async_trait]
-        impl $crate::client::Client for $crate::client::$client {
-            client_common_fns!();
-
-            async fn chat_completions_inner(
-                &self,
-                client: &reqwest::Client,
-                data: $crate::client::ChatCompletionsData,
-            ) -> anyhow::Result<$crate::client::ChatCompletionsOutput> {
-                let builder = self.chat_completions_builder(client, data)?;
-                $chat_completions(builder).await
-            }
-
-            async fn chat_completions_streaming_inner(
-                &self,
-                client: &reqwest::Client,
-                handler: &mut $crate::client::SseHandler,
-                data: $crate::client::ChatCompletionsData,
-            ) -> Result<()> {
-                let builder = self.chat_completions_builder(client, data)?;
-                $chat_completions_streaming(builder, handler).await
-            }
-        }
-    };
-    ($client:ident, $chat_completions:path, $chat_completions_streaming:path, $embeddings:path) => {
-        #[async_trait::async_trait]
-        impl $crate::client::Client for $crate::client::$client {
-            client_common_fns!();
-
-            async fn chat_completions_inner(
-                &self,
-                client: &reqwest::Client,
-                data: $crate::client::ChatCompletionsData,
-            ) -> anyhow::Result<$crate::client::ChatCompletionsOutput> {
-                let builder = self.chat_completions_builder(client, data)?;
-                $chat_completions(builder).await
-            }
-
-            async fn chat_completions_streaming_inner(
-                &self,
-                client: &reqwest::Client,
-                handler: &mut $crate::client::SseHandler,
-                data: $crate::client::ChatCompletionsData,
-            ) -> Result<()> {
-                let builder = self.chat_completions_builder(client, data)?;
-                $chat_completions_streaming(builder, handler).await
-            }
-
-            async fn embeddings_inner(
-                &self,
-                client: &reqwest::Client,
-                data: $crate::client::EmbeddingsData,
-            ) -> Result<$crate::client::EmbeddingsOutput> {
-                let builder = self.embeddings_builder(client, data)?;
-                $embeddings(builder).await
-            }
-        }
-    };
-    ($client:ident, $chat_completions:path, $chat_completions_streaming:path, $embeddings:path, $rerank:path) => {
-        #[async_trait::async_trait]
-        impl $crate::client::Client for $crate::client::$client {
-            client_common_fns!();
-
-            async fn chat_completions_inner(
-                &self,
-                client: &reqwest::Client,
-                data: $crate::client::ChatCompletionsData,
-            ) -> anyhow::Result<$crate::client::ChatCompletionsOutput> {
-                let builder = self.chat_completions_builder(client, data)?;
-                $chat_completions(builder).await
-            }
-
-            async fn chat_completions_streaming_inner(
-                &self,
-                client: &reqwest::Client,
-                handler: &mut $crate::client::SseHandler,
-                data: $crate::client::ChatCompletionsData,
-            ) -> Result<()> {
-                let builder = self.chat_completions_builder(client, data)?;
-                $chat_completions_streaming(builder, handler).await
-            }
-
-            async fn embeddings_inner(
-                &self,
-                client: &reqwest::Client,
-                data: $crate::client::EmbeddingsData,
-            ) -> Result<$crate::client::EmbeddingsOutput> {
-                let builder = self.embeddings_builder(client, data)?;
-                $embeddings(builder).await
-            }
-
-            async fn rerank_inner(
-                &self,
-                client: &reqwest::Client,
-                data: $crate::client::RerankData,
-            ) -> Result<$crate::client::RerankOutput> {
-                let builder = self.rerank_builder(client, data)?;
-                $rerank(builder).await
-            }
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! config_get_fn {
-    ($field_name:ident, $fn_name:ident) => {
-        fn $fn_name(&self) -> anyhow::Result<String> {
-            let api_key = self.config.$field_name.clone();
-            api_key
-                .or_else(|| {
-                    let env_prefix = Self::name(&self.config);
-                    let env_name =
-                        format!("{}_{}", env_prefix, stringify!($field_name)).to_ascii_uppercase();
-                    std::env::var(&env_name).ok()
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Miss '{}' in client configuration", stringify!($field_name))
-                })
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! unsupported_model {
-    ($name:expr) => {
-        anyhow::bail!("Unsupported model '{}'", $name)
-    };
-}
-
-#[async_trait]
+#[async_trait::async_trait]
 pub trait Client: Sync + Send {
     fn global_config(&self) -> &GlobalConfig;
 
     fn extra_config(&self) -> Option<&ExtraConfig>;
 
-    fn patches_config(&self) -> Option<&ModelPatches>;
+    fn patch_config(&self) -> Option<&RequestPatch>;
 
     fn name(&self) -> &str;
 
@@ -368,7 +73,7 @@ pub trait Client: Sync + Send {
             ret = async {
                 if self.global_config().read().dry_run {
                     let content = input.echo_messages();
-                    let tokens = tokenize(&content);
+                    let tokens = split_content(&content);
                     for token in tokens {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                         handler.text(token)?;
@@ -379,38 +84,28 @@ pub trait Client: Sync + Send {
                 let data = input.prepare_completion_data(self.model(), true)?;
                 self.chat_completions_streaming_inner(&client, handler, data).await
             } => {
-                handler.done()?;
+                handler.done();
                 ret.with_context(|| "Failed to call chat-completions api")
             }
             _ = watch_abort_signal(abort_signal) => {
-                handler.done()?;
+                handler.done();
                 Ok(())
             },
         }
     }
 
-    async fn embeddings(&self, data: EmbeddingsData) -> Result<Vec<Vec<f32>>> {
+    async fn embeddings(&self, data: &EmbeddingsData) -> Result<Vec<Vec<f32>>> {
         let client = self.build_client()?;
-        self.model().guard_max_batch_size(&data)?;
         self.embeddings_inner(&client, data)
             .await
             .context("Failed to call embeddings api")
     }
 
-    async fn rerank(&self, data: RerankData) -> Result<RerankOutput> {
+    async fn rerank(&self, data: &RerankData) -> Result<RerankOutput> {
         let client = self.build_client()?;
         self.rerank_inner(&client, data)
             .await
             .context("Failed to call rerank api")
-    }
-
-    fn patch_chat_completions_body(&self, body: &mut Value) {
-        let model_name = self.model().name();
-        if let Some(patch_data) = select_model_patch(self.patches_config(), model_name) {
-            if body.is_object() && patch_data.chat_completions_body.is_object() {
-                json_patch::merge(body, &patch_data.chat_completions_body)
-            }
-        }
     }
 
     async fn chat_completions_inner(
@@ -429,7 +124,7 @@ pub trait Client: Sync + Send {
     async fn embeddings_inner(
         &self,
         _client: &ReqwestClient,
-        _data: EmbeddingsData,
+        _data: &EmbeddingsData,
     ) -> Result<EmbeddingsOutput> {
         bail!("The client doesn't support embeddings api")
     }
@@ -437,9 +132,47 @@ pub trait Client: Sync + Send {
     async fn rerank_inner(
         &self,
         _client: &ReqwestClient,
-        _data: RerankData,
+        _data: &RerankData,
     ) -> Result<RerankOutput> {
         bail!("The client doesn't support rerank api")
+    }
+
+    fn request_builder(
+        &self,
+        client: &reqwest::Client,
+        mut request_data: RequestData,
+        api_type: ApiType,
+    ) -> RequestBuilder {
+        self.patch_request_data(&mut request_data, api_type);
+        request_data.into_builder(client)
+    }
+
+    fn patch_request_data(&self, request_data: &mut RequestData, api_type: ApiType) {
+        let map = std::env::var(get_env_name(&format!(
+            "patch_{}_{}",
+            self.model().client_name(),
+            api_type.name(),
+        )))
+        .ok()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .or_else(|| {
+            self.patch_config()
+                .and_then(|v| api_type.extract_patch(v))
+                .cloned()
+        });
+        let map = match map {
+            Some(v) => v,
+            _ => return,
+        };
+        for (key, patch) in map {
+            let key = ESCAPE_SLASH_RE.replace_all(&key, r"\/");
+            if let Ok(regex) = Regex::new(&format!("^({key})$")) {
+                if let Ok(true) = regex.is_match(self.model().name()) {
+                    request_data.apply_patch(patch);
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -455,28 +188,100 @@ pub struct ExtraConfig {
     pub connect_timeout: Option<u64>,
 }
 
-pub type ModelPatches = IndexMap<String, ModelPatch>;
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelPatch {
-    #[serde(default)]
-    pub chat_completions_body: Value,
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RequestPatch {
+    pub chat_completions: Option<ApiPatch>,
+    pub embeddings: Option<ApiPatch>,
+    pub rerank: Option<ApiPatch>,
 }
 
-pub fn select_model_patch<'a>(
-    patch: Option<&'a ModelPatches>,
-    name: &str,
-) -> Option<&'a ModelPatch> {
-    let patch = patch?;
-    for (key, patch_data) in patch {
-        let key = ESCAPE_SLASH_RE.replace_all(key, r"\/");
-        if let Ok(regex) = Regex::new(&format!("^({key})$")) {
-            if let Ok(true) = regex.is_match(name) {
-                return Some(patch_data);
+pub type ApiPatch = IndexMap<String, Value>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiType {
+    ChatCompletions,
+    Embeddings,
+    Rerank,
+}
+
+impl ApiType {
+    pub fn name(&self) -> &str {
+        match self {
+            ApiType::ChatCompletions => "chat_completions",
+            ApiType::Embeddings => "embeddings",
+            ApiType::Rerank => "rerank",
+        }
+    }
+    pub fn extract_patch<'a>(&self, patch: &'a RequestPatch) -> Option<&'a ApiPatch> {
+        match self {
+            ApiType::ChatCompletions => patch.chat_completions.as_ref(),
+            ApiType::Embeddings => patch.embeddings.as_ref(),
+            ApiType::Rerank => patch.rerank.as_ref(),
+        }
+    }
+}
+
+pub struct RequestData {
+    pub url: String,
+    pub headers: IndexMap<String, String>,
+    pub body: Value,
+}
+
+impl RequestData {
+    pub fn new<T>(url: T, body: Value) -> Self
+    where
+        T: std::fmt::Display,
+    {
+        Self {
+            url: url.to_string(),
+            headers: Default::default(),
+            body,
+        }
+    }
+
+    pub fn bearer_auth<T>(&mut self, auth: T)
+    where
+        T: std::fmt::Display,
+    {
+        self.headers
+            .insert("authorization".into(), format!("Bearer {auth}"));
+    }
+
+    pub fn header<K, V>(&mut self, key: K, value: V)
+    where
+        K: std::fmt::Display,
+        V: std::fmt::Display,
+    {
+        self.headers.insert(key.to_string(), value.to_string());
+    }
+
+    pub fn into_builder(self, client: &ReqwestClient) -> RequestBuilder {
+        let RequestData { url, headers, body } = self;
+        debug!("Request {url} {body}");
+
+        let mut builder = client.post(url);
+        for (key, value) in headers {
+            builder = builder.header(key, value);
+        }
+        builder = builder.json(&body);
+        builder
+    }
+
+    pub fn apply_patch(&mut self, patch: Value) {
+        if let Some(patch_url) = patch["url"].as_str() {
+            self.url = patch_url.into();
+        }
+        if let Some(patch_body) = patch.get("body") {
+            json_patch::merge(&mut self.body, patch_body)
+        }
+        if let Some(patch_headers) = patch["headers"].as_object() {
+            for (key, value) in patch_headers {
+                if let Some(value) = value.as_str() {
+                    self.header(key, value)
+                }
             }
         }
     }
-    None
 }
 
 #[derive(Debug)]
@@ -552,14 +357,14 @@ pub fn create_config(prompts: &[PromptAction], client: &str) -> Result<(String, 
         "type": client,
     });
     let mut model = client.to_string();
-    set_client_config_values(prompts, &mut model, &mut config)?;
+    set_client_config(prompts, &mut model, &mut config)?;
     let clients = json!(vec![config]);
     Ok((model, clients))
 }
 
 pub fn create_openai_compatible_client_config(client: &str) -> Result<Option<(String, Value)>> {
     match super::OPENAI_COMPATIBLE_PLATFORMS
-        .iter()
+        .into_iter()
         .find(|(name, _)| client == *name)
     {
         None => Ok(None),
@@ -567,13 +372,16 @@ pub fn create_openai_compatible_client_config(client: &str) -> Result<Option<(St
             let mut config = json!({
                 "type": OpenAICompatibleClient::NAME,
                 "name": name,
-                "api_base": api_base,
             });
-            let prompts = if ALL_MODELS.iter().any(|v| &v.platform == name) {
-                vec![("api_key", "API Key:", false, PromptKind::String)]
+            let mut prompts = vec![];
+            if api_base.is_empty() {
+                prompts.push(("api_base", "API Base:", true, PromptKind::String));
             } else {
-                vec![
-                    ("api_key", "API Key:", false, PromptKind::String),
+                config["api_base"] = api_base.into();
+            }
+            prompts.push(("api_key", "API Key:", false, PromptKind::String));
+            if !ALL_MODELS.iter().any(|v| v.platform == name) {
+                prompts.extend([
                     ("models[].name", "Model Name:", true, PromptKind::String),
                     (
                         "models[].max_input_tokens",
@@ -581,17 +389,38 @@ pub fn create_openai_compatible_client_config(client: &str) -> Result<Option<(St
                         false,
                         PromptKind::Integer,
                     ),
-                ]
+                ]);
             };
             let mut model = client.to_string();
-            set_client_config_values(&prompts, &mut model, &mut config)?;
+            set_client_config(&prompts, &mut model, &mut config)?;
             let clients = json!(vec![config]);
             Ok(Some((model, clients)))
         }
     }
 }
 
-pub async fn chat_completion_streaming(
+pub async fn call_chat_completions(
+    input: &Input,
+    client: &dyn Client,
+    config: &GlobalConfig,
+) -> Result<(String, Vec<ToolResult>)> {
+    let task = client.chat_completions(input.clone());
+    let ret = run_with_spinner(task, "Generating").await;
+    match ret {
+        Ok(ret) => {
+            let ChatCompletionsOutput {
+                text, tool_calls, ..
+            } = ret;
+            if !text.is_empty() {
+                config.read().print_markdown(&text)?;
+            }
+            Ok((text, eval_tool_calls(config, tool_calls)?))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+pub async fn call_chat_completions_streaming(
     input: &Input,
     client: &dyn Client,
     config: &GlobalConfig,
@@ -600,23 +429,23 @@ pub async fn chat_completion_streaming(
     let (tx, rx) = unbounded_channel();
     let mut handler = SseHandler::new(tx, abort.clone());
 
-    let (send_ret, rend_ret) = tokio::join!(
+    let (send_ret, render_ret) = tokio::join!(
         client.chat_completions_streaming(input, &mut handler),
         render_stream(rx, config, abort.clone()),
     );
-    if let Err(err) = rend_ret {
-        render_error(err, config.read().highlight);
-    }
-    let (output, calls) = handler.take();
+
+    render_ret?;
+
+    let (text, tool_calls) = handler.take();
     match send_ret {
         Ok(_) => {
-            if !output.is_empty() && !output.ends_with('\n') {
+            if !text.is_empty() && !text.ends_with('\n') {
                 println!();
             }
-            Ok((output, eval_tool_calls(config, calls)?))
+            Ok((text, eval_tool_calls(config, tool_calls)?))
         }
         Err(err) => {
-            if !output.is_empty() {
+            if !text.is_empty() {
                 println!();
             }
             Err(err)
@@ -636,9 +465,25 @@ where
 {
     let text = f(builder).await?;
     handler.text(&text)?;
-    handler.done()?;
+    handler.done();
 
     Ok(())
+}
+
+pub fn noop_prepare_embeddings<T>(_client: &T, _data: &EmbeddingsData) -> Result<RequestData> {
+    bail!("The client doesn't support embeddings api")
+}
+
+pub async fn noop_embeddings(_builder: RequestBuilder, _model: &Model) -> Result<EmbeddingsOutput> {
+    bail!("The client doesn't support embeddings api")
+}
+
+pub fn noop_prepare_rerank<T>(_client: &T, _data: &RerankData) -> Result<RequestData> {
+    bail!("The client doesn't support rerank api")
+}
+
+pub async fn noop_rerank(_builder: RequestBuilder, _model: &Model) -> Result<RerankOutput> {
+    bail!("The client doesn't support rerank api")
 }
 
 pub fn catch_error(data: &Value, status: u16) -> Result<()> {
@@ -648,22 +493,27 @@ pub fn catch_error(data: &Value, status: u16) -> Result<()> {
     debug!("Invalid response, status: {status}, data: {data}");
     if let Some(error) = data["error"].as_object() {
         if let (Some(typ), Some(message)) = (
-            get_str_field_from_json_map(error, "type"),
-            get_str_field_from_json_map(error, "message"),
+            json_str_from_map(error, "type"),
+            json_str_from_map(error, "message"),
         ) {
             bail!("{message} (type: {typ})");
+        } else if let (Some(typ), Some(message)) = (
+            json_str_from_map(error, "code"),
+            json_str_from_map(error, "message"),
+        ) {
+            bail!("{message} (code: {typ})");
         }
     } else if let Some(error) = data["errors"][0].as_object() {
         if let (Some(code), Some(message)) = (
-            get_u64_field_from_json_map(error, "code"),
-            get_str_field_from_json_map(error, "message"),
+            error.get("code").and_then(|v| v.as_u64()),
+            json_str_from_map(error, "message"),
         ) {
             bail!("{message} (status: {code})")
         }
     } else if let Some(error) = data[0]["error"].as_object() {
         if let (Some(status), Some(message)) = (
-            get_str_field_from_json_map(error, "status"),
-            get_str_field_from_json_map(error, "message"),
+            json_str_from_map(error, "status"),
+            json_str_from_map(error, "message"),
         ) {
             bail!("{message} (status: {status})")
         }
@@ -678,18 +528,11 @@ pub fn catch_error(data: &Value, status: u16) -> Result<()> {
     bail!("Invalid response data: {data} (status: {status})");
 }
 
-pub fn get_str_field_from_json_map<'a>(
+pub fn json_str_from_map<'a>(
     map: &'a serde_json::Map<String, Value>,
     field_name: &str,
 ) -> Option<&'a str> {
     map.get(field_name).and_then(|v| v.as_str())
-}
-
-pub fn get_u64_field_from_json_map(
-    map: &serde_json::Map<String, Value>,
-    field_name: &str,
-) -> Option<u64> {
-    map.get(field_name).and_then(|v| v.as_u64())
 }
 
 pub fn maybe_catch_error(data: &Value) -> Result<()> {
@@ -705,22 +548,30 @@ pub fn maybe_catch_error(data: &Value) -> Result<()> {
     Ok(())
 }
 
-fn set_client_config_values(
+fn set_client_config(
     list: &[PromptAction],
     model: &mut String,
     client_config: &mut Value,
 ) -> Result<()> {
+    let env_prefix = model.clone();
     for (path, desc, required, kind) in list {
+        let mut required = *required;
+        if required {
+            let env_name = format!("{env_prefix}_{path}").to_ascii_uppercase();
+            if std::env::var(&env_name).is_ok() {
+                required = false;
+            }
+        }
         match kind {
             PromptKind::String => {
-                let value = prompt_input_string(desc, *required)?;
+                let value = prompt_input_string(desc, required)?;
                 set_client_config_value(client_config, path, kind, &value);
                 if *path == "name" {
                     *model = value;
                 }
             }
             PromptKind::Integer => {
-                let value = prompt_input_integer(desc, *required)?;
+                let value = prompt_input_integer(desc, required)?;
                 set_client_config_value(client_config, path, kind, &value);
             }
         }
@@ -731,24 +582,24 @@ fn set_client_config_values(
 fn set_client_config_value(client_config: &mut Value, path: &str, kind: &PromptKind, value: &str) {
     let segs: Vec<&str> = path.split('.').collect();
     match segs.as_slice() {
-        [name] => client_config[name] = to_json(kind, value),
+        [name] => client_config[name] = prompt_value_to_json(kind, value),
         [scope, name] => match scope.split_once('[') {
             None => {
                 if client_config.get(scope).is_none() {
                     let mut obj = json!({});
-                    obj[name] = to_json(kind, value);
+                    obj[name] = prompt_value_to_json(kind, value);
                     client_config[scope] = obj;
                 } else {
-                    client_config[scope][name] = to_json(kind, value);
+                    client_config[scope][name] = prompt_value_to_json(kind, value);
                 }
             }
             Some((scope, _)) => {
                 if client_config.get(scope).is_none() {
                     let mut obj = json!({});
-                    obj[name] = to_json(kind, value);
+                    obj[name] = prompt_value_to_json(kind, value);
                     client_config[scope] = json!([obj]);
                 } else {
-                    client_config[scope][0][name] = to_json(kind, value);
+                    client_config[scope][0][name] = prompt_value_to_json(kind, value);
                 }
             }
         },
@@ -756,7 +607,7 @@ fn set_client_config_value(client_config: &mut Value, path: &str, kind: &PromptK
     }
 }
 
-fn to_json(kind: &PromptKind, value: &str) -> Value {
+fn prompt_value_to_json(kind: &PromptKind, value: &str) -> Value {
     if value.is_empty() {
         return Value::Null;
     }
@@ -766,5 +617,14 @@ fn to_json(kind: &PromptKind, value: &str) -> Value {
             Ok(value) => value.into(),
             Err(_) => value.into(),
         },
+    }
+}
+
+fn split_content(text: &str) -> Vec<&str> {
+    if text.is_ascii() {
+        text.split_inclusive(|c: char| c.is_ascii_whitespace())
+            .collect()
+    } else {
+        unicode_segmentation::UnicodeSegmentation::graphemes(text, true).collect()
     }
 }

@@ -6,16 +6,14 @@ use self::completer::ReplCompleter;
 use self::highlighter::ReplHighlighter;
 use self::prompt::ReplPrompt;
 
-use crate::client::chat_completion_streaming;
+use crate::client::{call_chat_completions, call_chat_completions_streaming};
 use crate::config::{AssertState, Config, GlobalConfig, Input, StateFlags};
 use crate::function::need_send_tool_results;
 use crate::render::render_error;
 use crate::utils::{create_abort_signal, run_command, set_text, temp_file, AbortSignal};
 
 use anyhow::{bail, Context, Result};
-use async_recursion::async_recursion;
 use fancy_regex::Regex;
-use lazy_static::lazy_static;
 use nu_ansi_term::Color;
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
@@ -25,15 +23,15 @@ use reedline::{
 use reedline::{MenuBuilder, Signal};
 use std::{env, fs, process};
 
-lazy_static! {
+lazy_static::lazy_static! {
     static ref SPLIT_FILES_TEXT_ARGS_RE: Regex =
         Regex::new(r"(?m) (-- |--\n|--\r\n|--\r|--$)").unwrap();
 }
 
 const MENU_NAME: &str = "completion_menu";
 
-lazy_static! {
-    static ref REPL_COMMANDS: [ReplCommand; 27] = [
+lazy_static::lazy_static! {
+    static ref REPL_COMMANDS: [ReplCommand; 34] = [
         ReplCommand::new(".help", "Show this help message", AssertState::pass()),
         ReplCommand::new(".info", "View system info", AssertState::pass()),
         ReplCommand::new(".model", "Change the current LLM", AssertState::pass()),
@@ -44,13 +42,23 @@ lazy_static! {
         ),
         ReplCommand::new(
             ".role",
-            "Switch to a specific role",
+            "Create or switch to a specific role",
             AssertState::False(StateFlags::SESSION | StateFlags::AGENT)
         ),
         ReplCommand::new(
             ".info role",
             "View role info",
             AssertState::True(StateFlags::ROLE),
+        ),
+        ReplCommand::new(
+            ".edit role",
+            "Edit the current role",
+            AssertState::TrueFalse(StateFlags::ROLE, StateFlags::SESSION_EMPTY | StateFlags::SESSION),
+        ),
+        ReplCommand::new(
+            ".save role",
+            "Save the current role to file",
+            AssertState::TrueFalse(StateFlags::ROLE, StateFlags::SESSION_EMPTY | StateFlags::SESSION),
         ),
         ReplCommand::new(
             ".exit role",
@@ -63,14 +71,14 @@ lazy_static! {
             AssertState::False(StateFlags::SESSION_EMPTY | StateFlags::SESSION),
         ),
         ReplCommand::new(
+            ".clear messages",
+            "Erase messages in the current session",
+            AssertState::True(StateFlags::SESSION)
+        ),
+        ReplCommand::new(
             ".info session",
             "View session info",
             AssertState::True(StateFlags::SESSION_EMPTY | StateFlags::SESSION),
-        ),
-        ReplCommand::new(
-            ".save session",
-            "Save the current session to file",
-            AssertState::True(StateFlags::SESSION_EMPTY | StateFlags::SESSION)
         ),
         ReplCommand::new(
             ".edit session",
@@ -83,9 +91,9 @@ lazy_static! {
             AssertState::pass(),
         ),
         ReplCommand::new(
-            ".clear messages",
-            "Erase messages in the current session",
-            AssertState::True(StateFlags::SESSION)
+            ".save session",
+            "Save the current session to file",
+            AssertState::True(StateFlags::SESSION_EMPTY | StateFlags::SESSION)
         ),
         ReplCommand::new(
             ".exit session",
@@ -94,29 +102,49 @@ lazy_static! {
         ),
         ReplCommand::new(
             ".rag",
-            "Init or use a rag",
+            "Init or use the RAG",
             AssertState::False(StateFlags::AGENT)
         ),
         ReplCommand::new(
+            ".rebuild rag",
+            "Rebuild the RAG to sync document changes",
+            AssertState::True(StateFlags::RAG),
+        ),
+        ReplCommand::new(
+            ".sources rag",
+            "View the RAG sources in the last query",
+            AssertState::True(StateFlags::RAG),
+        ),
+        ReplCommand::new(
             ".info rag",
-            "View rag info",
+            "View RAG info",
             AssertState::True(StateFlags::RAG),
         ),
         ReplCommand::new(
             ".exit rag",
-            "Leave the rag",
+            "Leave the RAG",
             AssertState::TrueFalse(StateFlags::RAG, StateFlags::AGENT),
         ),
         ReplCommand::new(".agent", "Use a agent", AssertState::bare()),
         ReplCommand::new(
-            ".info agent",
-            "View agent info",
-            AssertState::True(StateFlags::AGENT),
-        ),
-        ReplCommand::new(
             ".starter",
             "Use the conversation starter",
             AssertState::True(StateFlags::AGENT)
+        ),
+        ReplCommand::new(
+            ".variable",
+            "Set agent variable",
+            AssertState::True(StateFlags::AGENT)
+        ),
+        ReplCommand::new(
+            ".save agent-config",
+            "Save the current agent config to file",
+            AssertState::True(StateFlags::AGENT)
+        ),
+        ReplCommand::new(
+            ".info agent",
+            "View agent info",
+            AssertState::True(StateFlags::AGENT),
         ),
         ReplCommand::new(
             ".exit agent",
@@ -134,7 +162,8 @@ lazy_static! {
             "Regenerate the last response",
             AssertState::pass()
         ),
-        ReplCommand::new(".set", "Adjust settings", AssertState::pass()),
+        ReplCommand::new(".set", "Adjust runtime configuration", AssertState::pass()),
+        ReplCommand::new(".delete", "Delete roles/sessions/RAGs/agents", AssertState::pass()),
         ReplCommand::new(".copy", "Copy the last response", AssertState::pass()),
         ReplCommand::new(".exit", "Exit the REPL", AssertState::pass()),
     ];
@@ -216,24 +245,24 @@ impl Repl {
                 ".info" => match args {
                     Some("role") => {
                         let info = self.config.read().role_info()?;
-                        println!("{}", info);
+                        print!("{}", info);
                     }
                     Some("session") => {
                         let info = self.config.read().session_info()?;
-                        println!("{}", info);
+                        print!("{}", info);
                     }
                     Some("rag") => {
                         let info = self.config.read().rag_info()?;
-                        println!("{}", info);
+                        print!("{}", info);
                     }
                     Some("agent") => {
                         let info = self.config.read().agent_info()?;
-                        println!("{}", info);
+                        print!("{}", info);
                     }
                     Some(_) => unknown_command()?,
                     None => {
                         let output = self.config.read().sysinfo()?;
-                        println!("{}", output);
+                        print!("{}", output);
                     }
                 },
                 ".model" => match args {
@@ -249,17 +278,26 @@ impl Repl {
                     None => println!("Usage: .prompt <text>..."),
                 },
                 ".role" => match args {
-                    Some(args) => match args.split_once(|c| c == '\n' || c == ' ') {
+                    Some(args) => match args.split_once(['\n', ' ']) {
                         Some((name, text)) => {
                             let role = self.config.read().retrieve_role(name.trim())?;
                             let input = Input::from_str(&self.config, text.trim(), Some(role));
                             ask(&self.config, self.abort_signal.clone(), input, false).await?;
                         }
                         None => {
-                            self.config.write().use_role(args)?;
+                            let name = args;
+                            if Config::has_role(name) {
+                                self.config.write().use_role(name)?;
+                            } else {
+                                self.config.write().new_role(name)?;
+                            }
                         }
                     },
-                    None => println!(r#"Usage: .role <name> [text]..."#),
+                    None => println!(
+                        r#"Usage:
+    .role <name>                    # If the role exists, switch to it; otherwise, create a new role
+    .role <name> [text]...          # Temporarily switch to the role, send the text, and switch back"#
+                    ),
                 },
                 ".session" => {
                     self.config.write().use_session(args)?;
@@ -281,16 +319,15 @@ impl Repl {
                     }
                     None => {
                         let banner = self.config.read().agent_banner()?;
-                        let output = format!(
-                            r#"Usage: .starter <text>...
-
-Tips: use <tab> to autocomplete conversation starter text.
----------------------------------------------------------
-
-{banner}"#
-                        );
-
-                        println!("{output}");
+                        self.config.read().print_markdown(&banner)?;
+                    }
+                },
+                ".variable" => match args {
+                    Some(args) => {
+                        self.config.write().set_agent_variable(args)?;
+                    }
+                    _ => {
+                        println!("Usage: .variable <key> <value>")
                     }
                 },
                 ".save" => {
@@ -298,11 +335,17 @@ Tips: use <tab> to autocomplete conversation starter text.
                         Some((subcmd, args)) => (subcmd, Some(args.trim())),
                         None => (v, None),
                     }) {
+                        Some(("role", name)) => {
+                            self.config.write().save_role(name)?;
+                        }
                         Some(("session", name)) => {
                             self.config.write().save_session(name)?;
                         }
+                        Some(("agent-config", _)) => {
+                            self.config.write().save_agent_config()?;
+                        }
                         _ => {
-                            println!(r#"Usage: .save session [name]"#)
+                            println!(r#"Usage: .save <role|session|agent-config> [name]"#)
                         }
                     }
                 }
@@ -311,6 +354,9 @@ Tips: use <tab> to autocomplete conversation starter text.
                         Some((subcmd, args)) => (subcmd, Some(args.trim())),
                         None => (v, None),
                     }) {
+                        Some(("role", _)) => {
+                            self.config.write().edit_role()?;
+                        }
                         Some(("session", _)) => {
                             self.config.write().edit_session()?;
                         }
@@ -318,7 +364,7 @@ Tips: use <tab> to autocomplete conversation starter text.
                             let editor = self
                                 .config
                                 .read()
-                                .buffer_editor()
+                                .editor()
                                 .context("please setup a default editor")?;
 
                             let (mut input, _) = match self.config.read().last_message.clone() {
@@ -342,7 +388,34 @@ Tips: use <tab> to autocomplete conversation starter text.
                             }
                         }
                         _ => {
-                            println!(r#"Usage: .edit session | last"#)
+                            println!(r#"Usage: .edit <role|session|last>"#)
+                        }
+                    }
+                }
+                ".rebuild" => {
+                    match args.map(|v| match v.split_once(' ') {
+                        Some((subcmd, args)) => (subcmd, Some(args.trim())),
+                        None => (v, None),
+                    }) {
+                        Some(("rag", _)) => {
+                            Config::rebuild_rag(&self.config, self.abort_signal.clone()).await?;
+                        }
+                        _ => {
+                            println!(r#"Usage: .rebuild rag"#)
+                        }
+                    }
+                }
+                ".sources" => {
+                    match args.map(|v| match v.split_once(' ') {
+                        Some((subcmd, args)) => (subcmd, Some(args.trim())),
+                        None => (v, None),
+                    }) {
+                        Some(("rag", _)) => {
+                            let output = Config::rag_sources(&self.config)?;
+                            println!("{}", output);
+                        }
+                        _ => {
+                            println!(r#"Usage: .sources rag"#)
                         }
                     }
                 }
@@ -373,10 +446,18 @@ Tips: use <tab> to autocomplete conversation starter text.
                 }
                 ".set" => match args {
                     Some(args) => {
-                        self.config.write().update(args)?;
+                        Config::update(&self.config, args)?;
                     }
                     _ => {
                         println!("Usage: .set <key> <value>...")
+                    }
+                },
+                ".delete" => match args {
+                    Some(args) => {
+                        Config::delete(&self.config, args)?;
+                    }
+                    _ => {
+                        println!("Usage: .delete <roles|sessions|rags|agents>")
                     }
                 },
                 ".copy" => {
@@ -422,9 +503,10 @@ Tips: use <tab> to autocomplete conversation starter text.
     }
 
     fn banner(&self) {
+        let name = env!("CARGO_CRATE_NAME");
         let version = env!("CARGO_PKG_VERSION");
         print!(
-            r#"Welcome to aichat {version}
+            r#"Welcome to {name} {version}
 Type ".help" for additional help.
 "#
         )
@@ -446,7 +528,7 @@ Type ".help" for additional help.
             .with_validator(Box::new(ReplValidator))
             .with_ansi_colors(true);
 
-        if let Some(cmd) = config.read().buffer_editor() {
+        if let Ok(cmd) = config.read().editor() {
             let temp_file = temp_file("-repl-", ".txt");
             let command = process::Command::new(cmd);
             editor = editor.with_buffer_editor(command, temp_file);
@@ -487,7 +569,7 @@ Type ".help" for additional help.
     }
 
     fn create_edit_mode(config: &GlobalConfig) -> Box<dyn EditMode> {
-        let edit_mode: Box<dyn EditMode> = if config.read().keybindings.is_vi() {
+        let edit_mode: Box<dyn EditMode> = if config.read().keybindings == "vi" {
             let mut normal_keybindings = default_vi_normal_keybindings();
             let mut insert_keybindings = default_vi_insert_keybindings();
             Self::extra_keybindings(&mut normal_keybindings);
@@ -558,7 +640,7 @@ impl Validator for ReplValidator {
     }
 }
 
-#[async_recursion]
+#[async_recursion::async_recursion]
 async fn ask(
     config: &GlobalConfig,
     abort_signal: AbortSignal,
@@ -577,8 +659,12 @@ async fn ask(
 
     let client = input.create_client()?;
     config.write().before_chat_completion(&input)?;
-    let (output, tool_results) =
-        chat_completion_streaming(&input, client.as_ref(), config, abort_signal.clone()).await?;
+    let (output, tool_results) = if config.read().stream {
+        call_chat_completions_streaming(&input, client.as_ref(), config, abort_signal.clone())
+            .await?
+    } else {
+        call_chat_completions(&input, client.as_ref(), config).await?
+    };
     config
         .write()
         .after_chat_completion(&input, &output, &tool_results)?;

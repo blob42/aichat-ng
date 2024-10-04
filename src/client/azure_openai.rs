@@ -2,7 +2,6 @@ use super::openai::*;
 use super::*;
 
 use anyhow::Result;
-use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -12,7 +11,7 @@ pub struct AzureOpenAIConfig {
     pub api_key: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelData>,
-    pub patches: Option<ModelPatches>,
+    pub patch: Option<RequestPatch>,
     pub extra: Option<ExtraConfig>,
 }
 
@@ -31,58 +30,56 @@ impl AzureOpenAIClient {
             PromptKind::Integer,
         ),
     ];
-
-    fn chat_completions_builder(
-        &self,
-        client: &ReqwestClient,
-        data: ChatCompletionsData,
-    ) -> Result<RequestBuilder> {
-        let api_base = self.get_api_base()?;
-        let api_key = self.get_api_key()?;
-
-        let mut body = openai_build_chat_completions_body(data, &self.model);
-        self.patch_chat_completions_body(&mut body);
-
-        let url = format!(
-            "{}/openai/deployments/{}/chat/completions?api-version=2024-02-01",
-            &api_base,
-            self.model.name()
-        );
-
-        debug!("AzureOpenAI Chat Completions Request: {url} {body}");
-
-        let builder = client.post(url).header("api-key", api_key).json(&body);
-
-        Ok(builder)
-    }
-
-    fn embeddings_builder(
-        &self,
-        client: &ReqwestClient,
-        data: EmbeddingsData,
-    ) -> Result<RequestBuilder> {
-        let api_base = self.get_api_base()?;
-        let api_key = self.get_api_key()?;
-
-        let body = openai_build_embeddings_body(data, &self.model);
-
-        let url = format!(
-            "{}/openai/deployments/{}/embeddings?api-version=2024-02-01",
-            &api_base,
-            self.model.name()
-        );
-
-        debug!("AzureOpenAI Embeddings Request: {url} {body}");
-
-        let builder = client.post(url).header("api-key", api_key).json(&body);
-
-        Ok(builder)
-    }
 }
 
 impl_client_trait!(
     AzureOpenAIClient,
-    openai_chat_completions,
-    openai_chat_completions_streaming,
-    openai_embeddings
+    (
+        prepare_chat_completions,
+        openai_chat_completions,
+        openai_chat_completions_streaming
+    ),
+    (prepare_embeddings, openai_embeddings),
+    (noop_prepare_rerank, noop_rerank),
 );
+
+fn prepare_chat_completions(
+    self_: &AzureOpenAIClient,
+    data: ChatCompletionsData,
+) -> Result<RequestData> {
+    let api_base = self_.get_api_base()?;
+    let api_key = self_.get_api_key()?;
+
+    let url = format!(
+        "{}/openai/deployments/{}/chat/completions?api-version=2024-02-01",
+        &api_base,
+        self_.model.name()
+    );
+
+    let body = openai_build_chat_completions_body(data, &self_.model);
+
+    let mut request_data = RequestData::new(url, body);
+
+    request_data.header("api-key", api_key);
+
+    Ok(request_data)
+}
+
+fn prepare_embeddings(self_: &AzureOpenAIClient, data: &EmbeddingsData) -> Result<RequestData> {
+    let api_base = self_.get_api_base()?;
+    let api_key = self_.get_api_key()?;
+
+    let url = format!(
+        "{}/openai/deployments/{}/embeddings?api-version=2024-02-01",
+        &api_base,
+        self_.model.name()
+    );
+
+    let body = openai_build_embeddings_body(data, &self_.model);
+
+    let mut request_data = RequestData::new(url, body);
+
+    request_data.header("api-key", api_key);
+
+    Ok(request_data)
+}

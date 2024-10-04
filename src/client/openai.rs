@@ -1,7 +1,7 @@
 use super::*;
 
 use anyhow::{bail, Context, Result};
-use reqwest::{Client as ReqwestClient, RequestBuilder};
+use reqwest::RequestBuilder;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -15,7 +15,7 @@ pub struct OpenAIConfig {
     pub organization_id: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelData>,
-    pub patches: Option<ModelPatches>,
+    pub patch: Option<RequestPatch>,
     pub extra: Option<ExtraConfig>,
 }
 
@@ -25,52 +25,66 @@ impl OpenAIClient {
 
     pub const PROMPTS: [PromptAction<'static>; 1] =
         [("api_key", "API Key:", true, PromptKind::String)];
-
-    fn chat_completions_builder(
-        &self,
-        client: &ReqwestClient,
-        data: ChatCompletionsData,
-    ) -> Result<RequestBuilder> {
-        let api_key = self.get_api_key()?;
-        let api_base = self.get_api_base().unwrap_or_else(|_| API_BASE.to_string());
-
-        let mut body = openai_build_chat_completions_body(data, &self.model);
-        self.patch_chat_completions_body(&mut body);
-
-        let url = format!("{api_base}/chat/completions");
-
-        debug!("OpenAI Chat Completions Request: {url} {body}");
-
-        let mut builder = client.post(url).bearer_auth(api_key).json(&body);
-
-        if let Some(organization_id) = &self.config.organization_id {
-            builder = builder.header("OpenAI-Organization", organization_id);
-        }
-
-        Ok(builder)
-    }
-
-    fn embeddings_builder(
-        &self,
-        client: &ReqwestClient,
-        data: EmbeddingsData,
-    ) -> Result<RequestBuilder> {
-        let api_key = self.get_api_key()?;
-        let api_base = self.get_api_base().unwrap_or_else(|_| API_BASE.to_string());
-
-        let body = openai_build_embeddings_body(data, &self.model);
-
-        let url = format!("{api_base}/embeddings");
-
-        debug!("OpenAI Embeddings Request: {url} {body}");
-
-        let builder = client.post(url).bearer_auth(api_key).json(&body);
-
-        Ok(builder)
-    }
 }
 
-pub async fn openai_chat_completions(builder: RequestBuilder) -> Result<ChatCompletionsOutput> {
+impl_client_trait!(
+    OpenAIClient,
+    (
+        prepare_chat_completions,
+        openai_chat_completions,
+        openai_chat_completions_streaming
+    ),
+    (prepare_embeddings, openai_embeddings),
+    (noop_prepare_rerank, noop_rerank),
+);
+
+fn prepare_chat_completions(
+    self_: &OpenAIClient,
+    data: ChatCompletionsData,
+) -> Result<RequestData> {
+    let api_key = self_.get_api_key()?;
+    let api_base = self_
+        .get_api_base()
+        .unwrap_or_else(|_| API_BASE.to_string());
+
+    let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
+
+    let body = openai_build_chat_completions_body(data, &self_.model);
+
+    let mut request_data = RequestData::new(url, body);
+
+    request_data.bearer_auth(api_key);
+    if let Some(organization_id) = &self_.config.organization_id {
+        request_data.header("OpenAI-Organization", organization_id);
+    }
+
+    Ok(request_data)
+}
+
+fn prepare_embeddings(self_: &OpenAIClient, data: &EmbeddingsData) -> Result<RequestData> {
+    let api_key = self_.get_api_key()?;
+    let api_base = self_
+        .get_api_base()
+        .unwrap_or_else(|_| API_BASE.to_string());
+
+    let url = format!("{api_base}/embeddings");
+
+    let body = openai_build_embeddings_body(data, &self_.model);
+
+    let mut request_data = RequestData::new(url, body);
+
+    request_data.bearer_auth(api_key);
+    if let Some(organization_id) = &self_.config.organization_id {
+        request_data.header("OpenAI-Organization", organization_id);
+    }
+
+    Ok(request_data)
+}
+
+pub async fn openai_chat_completions(
+    builder: RequestBuilder,
+    _model: &Model,
+) -> Result<ChatCompletionsOutput> {
     let res = builder.send().await?;
     let status = res.status();
     let data: Value = res.json().await?;
@@ -85,6 +99,7 @@ pub async fn openai_chat_completions(builder: RequestBuilder) -> Result<ChatComp
 pub async fn openai_chat_completions_streaming(
     builder: RequestBuilder,
     handler: &mut SseHandler,
+    _model: &Model,
 ) -> Result<()> {
     let mut function_index = 0;
     let mut function_name = String::new();
@@ -93,10 +108,13 @@ pub async fn openai_chat_completions_streaming(
     let handle = |message: SseMmessage| -> Result<bool> {
         if message.data == "[DONE]" {
             if !function_name.is_empty() {
+                let arguments: Value = function_arguments.parse().with_context(|| {
+                    format!("Tool call '{function_name}' is invalid: arguments must be in valid JSON format")
+                })?;
                 handler.tool_call(ToolCall::new(
                     function_name.clone(),
-                    json!(function_arguments),
-                    Some(function_id.clone()),
+                    arguments,
+                    normalize_function_id(&function_id),
                 ))?;
             }
             return Ok(true);
@@ -113,10 +131,13 @@ pub async fn openai_chat_completions_streaming(
             let index = index.unwrap_or_default();
             if index != function_index {
                 if !function_name.is_empty() {
+                    let arguments: Value = function_arguments.parse().with_context(|| {
+                        format!("Tool call '{function_name}' is invalid: arguments must be in valid JSON format")
+                    })?;
                     handler.tool_call(ToolCall::new(
                         function_name.clone(),
-                        json!(function_arguments),
-                        Some(function_id.clone()),
+                        arguments,
+                        normalize_function_id(&function_id),
                     ))?;
                 }
                 function_name.clear();
@@ -125,7 +146,11 @@ pub async fn openai_chat_completions_streaming(
                 function_index = index;
             }
             if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
-                function_name = name.to_string();
+                if name.starts_with(&function_name) {
+                    function_name = name.to_string();
+                } else {
+                    function_name.push_str(name);
+                }
             }
             if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str()) {
                 function_arguments.push_str(arguments);
@@ -140,7 +165,10 @@ pub async fn openai_chat_completions_streaming(
     sse_stream(builder, handle).await
 }
 
-pub async fn openai_embeddings(builder: RequestBuilder) -> Result<EmbeddingsOutput> {
+pub async fn openai_embeddings(
+    builder: RequestBuilder,
+    _model: &Model,
+) -> Result<EmbeddingsOutput> {
     let res = builder.send().await?;
     let status = res.status();
     let data: Value = res.json().await?;
@@ -178,29 +206,57 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
             let Message { role, content } = message;
             match content {
                 MessageContent::ToolResults((tool_results, text)) => {
-                    let tool_calls: Vec<_> = tool_results.iter().map(|tool_result| {
-                        json!({
-                            "id": tool_result.call.id,
-                            "type": "function",
-                            "function": {
-                                "name": tool_result.call.name,
-                                "arguments": tool_result.call.arguments,
-                            },
-                        })
-                    }).collect();
-                    let mut messages = vec![
-                        json!({ "role": MessageRole::Assistant, "content": text, "tool_calls": tool_calls })
-                    ];
-                    for tool_result in tool_results {
-                        messages.push(
+                    if let Some(true) = tool_results.first().map(|v| v.call.id.is_some()) {
+                        let tool_calls: Vec<_> = tool_results.iter().map(|tool_result| {
                             json!({
-                                "role": "tool",
-                                "content": tool_result.output.to_string(),
-                                "tool_call_id": tool_result.call.id,
+                                "id": tool_result.call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_result.call.name,
+                                    "arguments": tool_result.call.arguments.to_string(),
+                                },
                             })
-                        );
+                        }).collect();
+                        let text = if text.is_empty() { Value::Null } else { text.into() };
+                        let mut messages = vec![
+                            json!({ "role": MessageRole::Assistant, "content": text, "tool_calls": tool_calls })
+                        ];
+                        for tool_result in tool_results {
+                            messages.push(
+                                json!({
+                                    "role": "tool",
+                                    "content": tool_result.output.to_string(),
+                                    "tool_call_id": tool_result.call.id,
+                                })
+                            );
+                        }
+                        messages
+                    } else {
+                       tool_results.into_iter().flat_map(|tool_result| {
+                            vec![
+                                json!({
+                                    "role": MessageRole::Assistant,
+                                    "content": null,
+                                    "tool_calls": [
+                                        {
+                                            "id": tool_result.call.id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": tool_result.call.name,
+                                                "arguments": tool_result.call.arguments.to_string(),
+                                            },
+                                        }
+                                    ]
+                                }),
+                                json!({
+                                    "role": "tool",
+                                    "content": tool_result.output.to_string(),
+                                    "tool_call_id": tool_result.call.id,
+                                })
+                            ]
+
+                        }).collect()
                     }
-                    messages
                 },
                 _ => vec![json!({ "role": role, "content": content })]
             }
@@ -238,7 +294,7 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
     body
 }
 
-pub fn openai_build_embeddings_body(data: EmbeddingsData, model: &Model) -> Value {
+pub fn openai_build_embeddings_body(data: &EmbeddingsData, model: &Model) -> Value {
     json!({
         "input": data.texts,
         "model": model.name()
@@ -252,24 +308,22 @@ pub fn openai_extract_chat_completions(data: &Value) -> Result<ChatCompletionsOu
 
     let mut tool_calls = vec![];
     if let Some(calls) = data["choices"][0]["message"]["tool_calls"].as_array() {
-        tool_calls = calls
-            .iter()
-            .filter_map(|call| {
-                if let (Some(name), Some(arguments), Some(id)) = (
-                    call["function"]["name"].as_str(),
-                    call["function"]["arguments"].as_str(),
-                    call["id"].as_str(),
-                ) {
-                    Some(ToolCall::new(
-                        name.to_string(),
-                        json!(arguments),
-                        Some(id.to_string()),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect()
+        for call in calls {
+            if let (Some(name), Some(arguments), Some(id)) = (
+                call["function"]["name"].as_str(),
+                call["function"]["arguments"].as_str(),
+                call["id"].as_str(),
+            ) {
+                let arguments: Value = arguments.parse().with_context(|| {
+                    format!("Tool call '{name}' is invalid: arguments must be in valid JSON format")
+                })?;
+                tool_calls.push(ToolCall::new(
+                    name.to_string(),
+                    arguments,
+                    Some(id.to_string()),
+                ));
+            }
+        }
     };
 
     if text.is_empty() && tool_calls.is_empty() {
@@ -285,9 +339,10 @@ pub fn openai_extract_chat_completions(data: &Value) -> Result<ChatCompletionsOu
     Ok(output)
 }
 
-impl_client_trait!(
-    OpenAIClient,
-    openai_chat_completions,
-    openai_chat_completions_streaming,
-    openai_embeddings
-);
+fn normalize_function_id(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}

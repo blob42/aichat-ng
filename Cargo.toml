@@ -1,6 +1,6 @@
 [package]
 name = "aichat-ng"
-version = "0.19.0"
+version = "0.22.0"
 edition = "2021"
 authors = ["blob42 <contact@blob42.xyz>"]
 description = "All-in-one AI CLI Tool"
@@ -8,7 +8,7 @@ license = "AGPL-3.0-or-later"
 homepage = "https://github.com/blob42/aichat-ng"
 repository = "https://github.com/blob42/aichat-ng"
 categories = ["command-line-utilities"]
-keywords = ["chatgpt", "llm", "cli", "gpt", "repl"]
+keywords = ["chatgpt", "llm", "cli", "ai", "repl"]
 
 [dependencies]
 anyhow = "1.0.69"
@@ -18,7 +18,7 @@ dirs = "5.0.0"
 futures-util = "0.3.29"
 inquire = "0.7.0"
 is-terminal = "0.4.9"
-reedline = "0.32.0"
+reedline = "0.34.0"
 serde = { version = "1.0.152", features = ["derive"] }
 serde_json = { version = "1.0.93", features = ["preserve_order"] }
 serde_yaml = "0.9.17"
@@ -32,8 +32,6 @@ parking_lot = "0.12.1"
 lazy_static = "1.4.0"
 fancy-regex = "0.13.0"
 base64 = "0.22.0"
-rustc-hash = "1.1.0"
-bstr = "1.8.0"
 nu-ansi-term = "0.50.0"
 async-trait = "0.1.74"
 textwrap = "0.16.0"
@@ -61,6 +59,11 @@ path-absolutize = "3.1.1"
 hnsw_rs = "0.3.0"
 rayon = "1.10.0"
 uuid = { version = "1.9.1", features = ["v4"] }
+scraper = { version = "0.20.0", default-features = false, features = ["deterministic"] }
+sys-locale = "0.3.1"
+html_to_markdown = "0.1.0"
+rust-embed = "8.5.0"
+os_info = { version = "3.8.2", default-features = false }
 
 [dependencies.reqwest]
 version = "0.12.0"

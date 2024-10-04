@@ -8,27 +8,29 @@ use crate::utils::*;
 
 mod bm25;
 mod loader;
+mod serde_vectors;
 mod splitter;
 
-use anyhow::bail;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use hnsw_rs::prelude::*;
 use indexmap::{IndexMap, IndexSet};
-use inquire::{required, validator::Validation, Select, Text};
+use inquire::{required, validator::Validation, Confirm, Select, Text};
+use parking_lot::RwLock;
 use path_absolutize::Absolutize;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
-use std::{fmt::Debug, io::BufReader, path::Path};
+use std::{collections::HashMap, env, fmt::Debug, fs, path::Path, time::Duration};
+use tokio::time::sleep;
 
 pub struct Rag {
+    config: GlobalConfig,
     name: String,
     path: String,
     embedding_model: Model,
     hnsw: Hnsw<'static, f32, DistCosine>,
     bm25: BM25<DocumentId>,
     data: RagData,
-    embedding_client: Box<dyn Client>,
+    last_sources: RwLock<Option<String>>,
 }
 
 impl Debug for Rag {
@@ -42,6 +44,21 @@ impl Debug for Rag {
     }
 }
 
+impl Clone for Rag {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            name: self.name.clone(),
+            path: self.path.clone(),
+            embedding_model: self.embedding_model.clone(),
+            hnsw: self.data.build_hnsw(),
+            bm25: self.bm25.clone(),
+            data: self.data.clone(),
+            last_sources: RwLock::new(None),
+        }
+    }
+}
+
 impl Rag {
     pub async fn init(
         config: &GlobalConfig,
@@ -51,18 +68,29 @@ impl Rag {
         abort_signal: AbortSignal,
     ) -> Result<Self> {
         debug!("init rag: {name}");
-        let (embedding_model, chunk_size, chunk_overlap) = Self::config(config)?;
-        let data = RagData::new(embedding_model.id(), chunk_size, chunk_overlap);
+        let (embedding_model, chunk_size, chunk_overlap) = Self::create_config(config)?;
+        let (reranker_model, top_k) = {
+            let config = config.read();
+            (config.rag_reranker_model.clone(), config.rag_top_k)
+        };
+        let data = RagData::new(
+            embedding_model.id(),
+            chunk_size,
+            chunk_overlap,
+            reranker_model,
+            top_k,
+            embedding_model.max_batch_size(),
+        );
         let mut rag = Self::create(config, name, save_path, data)?;
         let mut paths = doc_paths.to_vec();
         if paths.is_empty() {
-            paths = add_document_paths()?;
+            paths = add_documents()?;
         };
         debug!("doc paths: {paths:?}");
         let loaders = config.read().document_loaders.clone();
         let spinner = create_spinner("Starting").await;
         tokio::select! {
-            ret = rag.add_paths(loaders, &paths, Some(spinner.clone())) => {
+            ret = rag.sync_documents(loaders, &paths, Some(spinner.clone())) => {
                 spinner.stop();
                 ret?;
             }
@@ -71,18 +99,16 @@ impl Rag {
                 bail!("Aborted!")
             },
         };
-        if !rag.is_temp() {
-            rag.save(save_path)?;
+        if rag.save()? {
             println!("✨ Saved rag to '{}'", save_path.display());
         }
         Ok(rag)
     }
 
     pub fn load(config: &GlobalConfig, name: &str, path: &Path) -> Result<Self> {
-        let err = || format!("Failed to load rag '{name}'");
-        let file = std::fs::File::open(path).with_context(err)?;
-        let reader = BufReader::new(file);
-        let data: RagData = bincode::deserialize_from(reader).with_context(err)?;
+        let err = || format!("Failed to load rag '{name}' at '{}'", path.display());
+        let content = fs::read_to_string(path).with_context(err)?;
+        let data: RagData = serde_yaml::from_str(&content).with_context(err)?;
         Self::create(config, name, path, data)
     }
 
@@ -90,20 +116,45 @@ impl Rag {
         let hnsw = data.build_hnsw();
         let bm25 = data.build_bm25();
         let embedding_model = Model::retrieve_embedding(&config.read(), &data.embedding_model)?;
-        let embedding_client = init_client(config, Some(embedding_model.clone()))?;
         let rag = Rag {
+            config: config.clone(),
             name: name.to_string(),
             path: path.display().to_string(),
             data,
             embedding_model,
             hnsw,
             bm25,
-            embedding_client,
+            last_sources: RwLock::new(None),
         };
         Ok(rag)
     }
 
-    pub fn config(config: &GlobalConfig) -> Result<(Model, usize, usize)> {
+    pub async fn rebuild(
+        &mut self,
+        config: &GlobalConfig,
+        abort_signal: AbortSignal,
+    ) -> Result<()> {
+        debug!("rebuild rag: {}", self.name);
+        let loaders = config.read().document_loaders.clone();
+        let spinner = create_spinner("Starting").await;
+        let paths = self.data.document_paths.clone();
+        tokio::select! {
+            ret = self.sync_documents(loaders, &paths, Some(spinner.clone())) => {
+                spinner.stop();
+                ret?;
+            }
+            _ = watch_abort_signal(abort_signal) => {
+                spinner.stop();
+                bail!("Aborted!")
+            },
+        };
+        if self.save()? {
+            println!("✨ Saved rag to '{}'", self.path);
+        }
+        Ok(())
+    }
+
+    pub fn create_config(config: &GlobalConfig) -> Result<(Model, usize, usize)> {
         let (embedding_model_id, chunk_size, chunk_overlap) = {
             let config = config.read();
             (
@@ -167,21 +218,80 @@ impl Rag {
         Ok((embedding_model, chunk_size, chunk_overlap))
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
-        ensure_parent_exists(path)?;
-        let mut file = std::fs::File::create(path)?;
-        bincode::serialize_into(&mut file, &self.data)
-            .with_context(|| format!("Failed to save rag '{}'", self.name))?;
+    pub fn get_config(&self) -> (Option<String>, usize) {
+        (self.data.reranker_model.clone(), self.data.top_k)
+    }
+
+    pub fn get_last_sources(&self) -> Option<String> {
+        self.last_sources.read().clone()
+    }
+
+    pub fn set_last_sources(&self, ids: &[DocumentId]) {
+        let sources: IndexSet<_> = ids
+            .iter()
+            .filter_map(|id| {
+                let (file_index, _) = split_document_id(*id);
+                let file = self.data.files.get(&file_index)?;
+                Some(file.path.clone())
+            })
+            .collect();
+        let sources = if sources.is_empty() {
+            None
+        } else {
+            Some(sources.into_iter().collect::<Vec<_>>().join("\n"))
+        };
+        *self.last_sources.write() = sources;
+    }
+
+    pub fn set_reranker_model(&mut self, reranker_model: Option<String>) -> Result<()> {
+        self.data.reranker_model = reranker_model;
+        self.save()?;
         Ok(())
     }
 
+    pub fn set_top_k(&mut self, top_k: usize) -> Result<()> {
+        self.data.top_k = top_k;
+        self.save()?;
+        Ok(())
+    }
+
+    pub fn save(&self) -> Result<bool> {
+        if self.is_temp() {
+            return Ok(false);
+        }
+        let path = Path::new(&self.path);
+        ensure_parent_exists(path)?;
+
+        let content = serde_yaml::to_string(&self.data)
+            .with_context(|| format!("Failed to serde rag '{}'", self.name))?;
+        fs::write(path, content).with_context(|| {
+            format!("Failed to save rag '{}' to '{}'", self.name, path.display())
+        })?;
+
+        Ok(true)
+    }
+
     pub fn export(&self) -> Result<String> {
-        let files: Vec<_> = self.data.files.iter().map(|v| &v.path).collect();
+        let files: Vec<_> = self
+            .data
+            .files
+            .iter()
+            .map(|(_, v)| {
+                json!({
+                    "path": v.path,
+                    "num_chunks": v.documents.len(),
+                })
+            })
+            .collect();
         let data = json!({
             "path": self.path,
             "embedding_model": self.embedding_model.id(),
             "chunk_size": self.data.chunk_size,
             "chunk_overlap": self.data.chunk_overlap,
+            "reranker_model": self.data.reranker_model,
+            "top_k": self.data.top_k,
+            "batch_size": self.data.batch_size,
+            "document_paths": self.data.document_paths,
             "files": files,
         });
         let output = serde_yaml::to_string(&data)
@@ -203,12 +313,12 @@ impl Rag {
         top_k: usize,
         min_score_vector_search: f32,
         min_score_keyword_search: f32,
-        rerank: Option<(Box<dyn Client>, f32)>,
+        rerank_model: Option<&str>,
         abort_signal: AbortSignal,
-    ) -> Result<String> {
+    ) -> Result<(String, Vec<DocumentId>)> {
         let spinner = create_spinner("Searching").await;
         let ret = tokio::select! {
-            ret = self.hybird_search(text, top_k, min_score_vector_search, min_score_keyword_search, rerank) => {
+            ret = self.hybird_search(text, top_k, min_score_vector_search, min_score_keyword_search, rerank_model) => {
                 ret
             }
             _ = watch_abort_signal(abort_signal) => {
@@ -216,134 +326,126 @@ impl Rag {
             },
         };
         spinner.stop();
-        let output = ret?.join("\n\n");
-        Ok(output)
+        let (ids, documents): (Vec<_>, Vec<_>) = ret?.into_iter().unzip();
+        let embeddings = documents.join("\n\n");
+        Ok((embeddings, ids))
     }
 
-    pub async fn add_paths<T: AsRef<str>>(
+    pub async fn sync_documents<T: AsRef<str>>(
         &mut self,
         loaders: HashMap<String, String>,
         paths: &[T],
         spinner: Option<Spinner>,
     ) -> Result<()> {
-        let mut rag_files = vec![];
+        if let Some(spinner) = &spinner {
+            let _ = spinner.set_message(String::new());
+        }
 
-        // List files
-        let mut new_paths = vec![];
-        progress(&spinner, "Gathering paths".into());
-        for path in paths {
+        let mut document_paths = vec![];
+        let mut files = vec![];
+        let paths_len = paths.len();
+        let mut has_error = false;
+        for (index, path) in paths.iter().enumerate() {
             let path = path.as_ref();
-            if Self::is_url_path(path) {
-                if let Some(path) = path.strip_suffix("**") {
-                    new_paths.push((path.to_string(), RECURSIVE_URL_LOADER.into()));
-                } else {
-                    new_paths.push((path.to_string(), URL_LOADER.into()))
-                }
-            } else {
-                let path = Path::new(path);
-                let path = path
-                    .absolutize()
-                    .with_context(|| anyhow!("Invalid path '{}'", path.display()))?;
-                let path_str = path.display().to_string();
-                if self.data.files.iter().any(|v| v.path == path_str) {
+            println!("Load {path} [{}/{paths_len}]", index + 1);
+            let (path, document_files) = load_document(&loaders, path, &mut has_error).await;
+            files.extend(document_files);
+            document_paths.push(path);
+        }
+
+        if has_error {
+            let mut aborted = true;
+            if *IS_STDOUT_TERMINAL && !document_paths.is_empty() {
+                let ans = Confirm::new("Some documents failed to load. Continue?")
+                    .with_default(false)
+                    .prompt()?;
+                aborted = !ans;
+            }
+            if aborted {
+                bail!("Aborted");
+            }
+        }
+
+        let mut to_deleted: IndexMap<String, FileId> = Default::default();
+        for (file_id, file) in &self.data.files {
+            to_deleted.insert(file.hash.clone(), *file_id);
+        }
+
+        let mut rag_files = vec![];
+        for (contents, mut metadata) in files {
+            let path = match metadata.swap_remove(PATH_METADATA) {
+                Some(v) => v,
+                None => continue,
+            };
+            let hash = sha256(&contents);
+            if let Some(file_id) = to_deleted.get(&hash) {
+                if self.data.files[file_id].path == path {
+                    to_deleted.swap_remove(&hash);
                     continue;
                 }
-                let (path_str, suffixes) = parse_glob(&path_str)?;
-                let suffixes = if suffixes.is_empty() {
-                    None
-                } else {
-                    Some(&suffixes)
-                };
-                let mut file_paths = vec![];
-                list_files(&mut file_paths, Path::new(&path_str), suffixes).await?;
-                for file_path in file_paths {
-                    let loader_name = Path::new(&file_path)
-                        .extension()
-                        .map(|v| v.to_string_lossy().to_lowercase())
-                        .unwrap_or_default();
-                    new_paths.push((file_path, loader_name))
+            }
+            let extension = metadata
+                .swap_remove(EXTENSION_METADATA)
+                .unwrap_or_else(|| DEFAULT_EXTENSION.into());
+            let separator = get_separators(&extension);
+            let splitter = RecursiveCharacterTextSplitter::new(
+                self.data.chunk_size,
+                self.data.chunk_overlap,
+                &separator,
+            );
+
+            let metadata = metadata
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}\n"))
+                .collect::<Vec<String>>()
+                .join("");
+            let split_options = SplitterChunkHeaderOptions::default().with_chunk_header(&format!(
+                "<document_metadata>\npath: {path}\n{metadata}</document_metadata>\n\n"
+            ));
+            let document = RagDocument::new(contents);
+            let split_documents = splitter.split_documents(&[document], &split_options);
+            rag_files.push(RagFile {
+                hash: hash.clone(),
+                path,
+                documents: split_documents,
+            });
+        }
+
+        let mut next_file_id = self.data.next_file_id;
+        let mut files = vec![];
+        let mut document_ids = vec![];
+        let mut embeddings = vec![];
+
+        if !rag_files.is_empty() {
+            let mut texts = vec![];
+            for file in rag_files.into_iter() {
+                for (document_index, document) in file.documents.iter().enumerate() {
+                    document_ids.push(combine_document_id(next_file_id, document_index));
+                    texts.push(document.page_content.clone())
                 }
+                files.push((next_file_id, file));
+                next_file_id += 1;
             }
+
+            let embeddings_data = EmbeddingsData::new(texts, false);
+            embeddings = self
+                .create_embeddings(embeddings_data, spinner.clone())
+                .await?;
         }
 
-        // Load files
-        let new_paths_len = new_paths.len();
-        if new_paths_len > 0 {
-            if let Some(spinner) = &spinner {
-                let _ = spinner.set_message(String::new());
-            }
-            for (index, (path, extension)) in new_paths.into_iter().enumerate() {
-                println!("Loading {path} [{}/{new_paths_len}]", index + 1);
-                let documents = load(&loaders, &path, &extension)
-                    .await
-                    .with_context(|| format!("Failed to load '{path}'"))?;
-                let splitted_documents: Vec<_> = documents
-                    .into_iter()
-                    .flat_map(|mut document| {
-                        let extension = document
-                            .metadata
-                            .swap_remove(EXTENSION_METADATA)
-                            .unwrap_or_else(|| extension.clone());
-                        let separator = get_separators(&extension);
-                        let splitter = RecursiveCharacterTextSplitter::new(
-                            self.data.chunk_size,
-                            self.data.chunk_overlap,
-                            &separator,
-                        );
-                        let metadata = document
-                            .metadata
-                            .iter()
-                            .map(|(k, v)| format!("{k}: {v}\n"))
-                            .collect::<Vec<String>>()
-                            .join("");
-                        let split_options = SplitterChunkHeaderOptions::default()
-                            .with_chunk_header(&format!(
-                                "<document_metadata>\n{metadata}</document_metadata>\n\n"
-                            ));
-                        splitter.split_documents(&[document], &split_options)
-                    })
-                    .collect();
-                let display_path = if extension == RECURSIVE_URL_LOADER {
-                    format!("{path}**")
-                } else {
-                    path
-                };
-                rag_files.push(RagFile {
-                    path: display_path,
-                    documents: splitted_documents,
-                })
-            }
+        self.data.del(to_deleted.values().cloned().collect());
+        self.data.add(next_file_id, files, document_ids, embeddings);
+        self.data.document_paths = document_paths;
+
+        if self.data.files.is_empty() {
+            bail!("No RAG files");
         }
 
-        if rag_files.is_empty() {
-            return Ok(());
-        }
-
-        // Convert vectors
-        let mut vector_ids = vec![];
-        let mut texts = vec![];
-        for (file_index, file) in rag_files.iter().enumerate() {
-            for (document_index, document) in file.documents.iter().enumerate() {
-                vector_ids.push(combine_document_id(file_index, document_index));
-                texts.push(document.page_content.clone())
-            }
-        }
-
-        let embeddings_data = EmbeddingsData::new(texts, false);
-        let embeddings = self
-            .create_embeddings(embeddings_data, spinner.clone())
-            .await?;
-
-        self.data.add(rag_files, vector_ids, embeddings);
-        progress(&spinner, "Building vector store".into());
+        progress(&spinner, "Building store".into());
         self.hnsw = self.data.build_hnsw();
         self.bm25 = self.data.build_bm25();
 
         Ok(())
-    }
-
-    pub fn is_url_path(path: &str) -> bool {
-        path.starts_with("http://") || path.starts_with("https://")
     }
 
     async fn hybird_search(
@@ -352,8 +454,8 @@ impl Rag {
         top_k: usize,
         min_score_vector_search: f32,
         min_score_keyword_search: f32,
-        rerank: Option<(Box<dyn Client>, f32)>,
-    ) -> Result<Vec<String>> {
+        rerank_model: Option<&str>,
+    ) -> Result<Vec<(DocumentId, String)>> {
         let (vector_search_result, text_search_result) = tokio::join!(
             self.vector_search(query, top_k, min_score_vector_search),
             self.keyword_search(query, top_k, min_score_keyword_search)
@@ -361,11 +463,14 @@ impl Rag {
         let vector_search_ids = vector_search_result?;
         let keyword_search_ids = text_search_result?;
         debug!(
-            "vector_search_ids: {vector_search_ids:?}, keyword_search_ids: {keyword_search_ids:?}"
+            "vector_search_ids: {:?}, keyword_search_ids: {:?}",
+            pretty_document_ids(&vector_search_ids),
+            pretty_document_ids(&keyword_search_ids)
         );
-        let ids = match rerank {
-            Some((client, min_score)) => {
-                let min_score = min_score as f64;
+        let ids = match rerank_model {
+            Some(model_id) => {
+                let model = Model::retrieve_reranker(&self.config.read(), model_id)?;
+                let client = init_client(&self.config, Some(model))?;
                 let ids: IndexSet<DocumentId> = [vector_search_ids, keyword_search_ids]
                     .concat()
                     .into_iter()
@@ -379,19 +484,13 @@ impl Rag {
                     }
                 }
                 let data = RerankData::new(query.to_string(), documents, top_k);
-                let list = client.rerank(data).await?;
-                let ids = list
+                let list = client.rerank(&data).await.context("Failed to rerank")?;
+                let ids: Vec<_> = list
                     .into_iter()
                     .take(top_k)
-                    .filter_map(|item| {
-                        if item.relevance_score < min_score {
-                            None
-                        } else {
-                            documents_ids.get(item.index).cloned()
-                        }
-                    })
+                    .filter_map(|item| documents_ids.get(item.index).cloned())
                     .collect();
-                debug!("rerank_ids: {ids:?}");
+                debug!("rerank_ids: {:?}", pretty_document_ids(&ids));
                 ids
             }
             None => {
@@ -400,7 +499,7 @@ impl Rag {
                     vec![1.0, 1.0],
                     top_k,
                 );
-                debug!("rrf_ids: {ids:?}");
+                debug!("rrf_ids: {:?}", pretty_document_ids(&ids));
                 ids
             }
         };
@@ -408,7 +507,7 @@ impl Rag {
             .into_iter()
             .filter_map(|id| {
                 let document = self.data.get(id)?;
-                Some(document.page_content.clone())
+                Some((id, document.page_content.clone()))
             })
             .collect();
         Ok(output)
@@ -461,10 +560,29 @@ impl Rag {
         data: EmbeddingsData,
         spinner: Option<Spinner>,
     ) -> Result<EmbeddingsOutput> {
+        let embedding_client = init_client(&self.config, Some(self.embedding_model.clone()))?;
         let EmbeddingsData { texts, query } = data;
+        let batch_size = self
+            .data
+            .batch_size
+            .or_else(|| self.embedding_model.max_batch_size());
+        let batch_size = match self.embedding_model.max_input_tokens() {
+            Some(max_input_tokens) => {
+                let x = max_input_tokens / self.data.chunk_size;
+                match batch_size {
+                    Some(y) => x.min(y),
+                    None => x,
+                }
+            }
+            None => batch_size.unwrap_or(1),
+        };
         let mut output = vec![];
-        let batch_chunks = texts.chunks(self.embedding_model.max_batch_size());
+        let batch_chunks = texts.chunks(batch_size.max(1));
         let batch_chunks_len = batch_chunks.len();
+        let retry_limit = env::var(get_env_name("embeddings_retry_limit"))
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(2);
         for (index, texts) in batch_chunks.enumerate() {
             progress(
                 &spinner,
@@ -474,32 +592,78 @@ impl Rag {
                 texts: texts.to_vec(),
                 query,
             };
-            let chunk_output = self
-                .embedding_client
-                .embeddings(chunk_data)
-                .await
-                .context("Failed to create embedding")?;
+            let mut retry = 0;
+            let chunk_output = loop {
+                retry += 1;
+                match embedding_client.embeddings(&chunk_data).await {
+                    Ok(v) => break v,
+                    Err(e) if retry < retry_limit => {
+                        debug!("retry {} failed: {}", retry, e);
+                        sleep(Duration::from_secs(2u64.pow(retry - 1))).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!("Failed to create embedding after {retry_limit} attempts")
+                        })?
+                    }
+                }
+            };
             output.extend(chunk_output);
         }
         Ok(output)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RagData {
     pub embedding_model: String,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
-    pub files: Vec<RagFile>,
+    pub reranker_model: Option<String>,
+    pub top_k: usize,
+    pub batch_size: Option<usize>,
+    pub next_file_id: FileId,
+    pub document_paths: Vec<String>,
+    pub files: IndexMap<FileId, RagFile>,
+    #[serde(with = "serde_vectors")]
     pub vectors: IndexMap<DocumentId, Vec<f32>>,
 }
 
+impl Debug for RagData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RagData")
+            .field("embedding_model", &self.embedding_model)
+            .field("chunk_size", &self.chunk_size)
+            .field("chunk_overlap", &self.chunk_overlap)
+            .field("reranker_model", &self.reranker_model)
+            .field("top_k", &self.top_k)
+            .field("batch_size", &self.batch_size)
+            .field("next_file_id", &self.next_file_id)
+            .field("document_paths", &self.document_paths)
+            .field("files", &self.files)
+            .finish()
+    }
+}
+
 impl RagData {
-    pub fn new(embedding_model: String, chunk_size: usize, chunk_overlap: usize) -> Self {
+    pub fn new(
+        embedding_model: String,
+        chunk_size: usize,
+        chunk_overlap: usize,
+        reranker_model: Option<String>,
+        top_k: usize,
+        batch_size: Option<usize>,
+    ) -> Self {
         Self {
             embedding_model,
             chunk_size,
             chunk_overlap,
+            reranker_model,
+            top_k,
+            batch_size,
+            next_file_id: 0,
+            document_paths: Default::default(),
             files: Default::default(),
             vectors: Default::default(),
         }
@@ -507,19 +671,33 @@ impl RagData {
 
     pub fn get(&self, id: DocumentId) -> Option<&RagDocument> {
         let (file_index, document_index) = split_document_id(id);
-        let file = self.files.get(file_index)?;
+        let file = self.files.get(&file_index)?;
         let document = file.documents.get(document_index)?;
         Some(document)
     }
 
+    pub fn del(&mut self, file_ids: Vec<FileId>) {
+        for file_id in file_ids {
+            if let Some(file) = self.files.swap_remove(&file_id) {
+                for (document_index, _) in file.documents.iter().enumerate() {
+                    let document_id = combine_document_id(file_id, document_index);
+                    self.vectors.swap_remove(&document_id);
+                }
+            }
+        }
+    }
+
     pub fn add(
         &mut self,
-        files: Vec<RagFile>,
-        vector_ids: Vec<DocumentId>,
+        next_file_id: FileId,
+        files: Vec<(FileId, RagFile)>,
+        document_ids: Vec<DocumentId>,
         embeddings: EmbeddingsOutput,
     ) {
+        self.next_file_id = next_file_id;
         self.files.extend(files);
-        self.vectors.extend(vector_ids.into_iter().zip(embeddings));
+        self.vectors
+            .extend(document_ids.into_iter().zip(embeddings));
     }
 
     pub fn build_hnsw(&self) -> Hnsw<'static, f32, DistCosine> {
@@ -531,9 +709,9 @@ impl RagData {
 
     pub fn build_bm25(&self) -> BM25<DocumentId> {
         let mut corpus = vec![];
-        for (file_index, file) in self.files.iter().enumerate() {
+        for (file_index, file) in self.files.iter() {
             for (document_index, document) in file.documents.iter().enumerate() {
-                let id = combine_document_id(file_index, document_index);
+                let id = combine_document_id(*file_index, document_index);
                 corpus.push((id, document.page_content.clone()));
             }
         }
@@ -543,6 +721,7 @@ impl RagData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RagFile {
+    hash: String,
     path: String,
     documents: Vec<RagDocument>,
 }
@@ -560,11 +739,6 @@ impl RagDocument {
             metadata: IndexMap::new(),
         }
     }
-
-    pub fn with_metadata(mut self, metadata: RagMetadata) -> Self {
-        self.metadata = metadata;
-        self
-    }
 }
 
 impl Default for RagDocument {
@@ -578,6 +752,7 @@ impl Default for RagDocument {
 
 pub type RagMetadata = IndexMap<String, String>;
 
+pub type FileId = usize;
 pub type DocumentId = usize;
 
 pub fn combine_document_id(file_index: usize, document_index: usize) -> DocumentId {
@@ -589,6 +764,15 @@ pub fn split_document_id(value: DocumentId) -> (usize, usize) {
     let low = value & low_mask;
     let high = value >> (usize::BITS / 2);
     (high, low)
+}
+
+fn pretty_document_ids(ids: &[DocumentId]) -> Vec<String> {
+    ids.iter()
+        .map(|v| {
+            let (h, l) = split_document_id(*v);
+            format!("{h}-{l}")
+        })
+        .collect()
 }
 
 fn select_embedding_model(models: &[&Model]) -> Result<String> {
@@ -603,8 +787,8 @@ fn select_embedding_model(models: &[&Model]) -> Result<String> {
 fn set_chunk_size(model: &Model) -> Result<usize> {
     let default_value = model.default_chunk_size().to_string();
     let help_message = model
-        .max_input_tokens()
-        .map(|v| format!("The model's max_input_token is {v}"));
+        .max_tokens_per_chunk()
+        .map(|v| format!("The model's max_tokens is {v}"));
 
     let mut text = Text::new("Set chunk size:")
         .with_default(&default_value)
@@ -636,12 +820,22 @@ fn set_chunk_overlay(default_value: usize) -> Result<usize> {
     value.parse().map_err(|_| anyhow!("Invalid chunk_overlay"))
 }
 
-fn add_document_paths() -> Result<Vec<String>> {
+fn add_documents() -> Result<Vec<String>> {
     let text = Text::new("Add documents:")
         .with_validator(required!("This field is required"))
-        .with_help_message("e.g. file;dir/;dir/**/*.md;url;sites/**")
+        .with_help_message("e.g. file;dir/;dir/**/*.{md,mdx};solo-url;site-url/**")
         .prompt()?;
-    let paths = text.split(';').map(|v| v.trim().to_string()).collect();
+    let paths = text
+        .split(';')
+        .filter_map(|v| {
+            let v = v.trim().to_string();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        })
+        .collect();
     Ok(paths)
 }
 

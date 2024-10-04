@@ -1,7 +1,7 @@
 # AIChatNG: All-in-one LLM CLI Tool
 
 
-AIChat is an all-in-one AI CLI tool featuring Chat-REPL, Shell Assistant, RAG, Tool Use, AI Agent, and More.
+AIChat is an all-in-one AI CLI tool featuring Chat-REPL, Shell Assistant, RAG, AI Tools & Agents, and More. 
 
 This is a fork of [aichat](https://github.com/sigoden/aichat) with the following improvements:
 
@@ -25,51 +25,87 @@ The [config.example.yaml](https://github.com/sigoden/aichat/blob/main/config.exa
 
 ## Features
 
-### 20+ Platforms
+### Multi-Platform Support
 
-AIChat offers users a wide and diverse selection of Large Language Models (LLMs):
+Effortlessly connect with over 20 leading LLM platforms through a unified interface:
 
-- **OpenAI:** GPT-4/GPT-3.5 (paid, vision, embedding, function-calling)
-- **Gemini:** Gemini-1.5/Gemini-1.0 (free, paid, vision, embedding, function-calling)
-- **Claude:** Claude-3.5/Claude-3 (paid, vision, function-calling)
-- **Ollama:** (free, local, embedding)
-- **Groq:** Llama-3/Mixtral/Gemma (free, function-calling)
-- **Azure-OpenAI:** GPT-4/GPT-3.5 (paid, vision, embedding, function-calling)
-- **VertexAI:** Gemini-1.5/Gemini-1.0 (paid, vision, embedding, function-calling)
-- **VertexAI-Claude:** Claude-3.5/Claude-3 (paid, vision)
-- **Bedrock:** Llama-3/Claude-3.5/Claude-3/Mistral (paid, vision)
-- **Mistral** (paid, embedding, function-calling)
-- **Cohere:** Command-R/Command-R+ (paid, embedding, reranker, function-calling)
-- **Perplexity:** Llama-3/Mixtral (paid)
-- **Cloudflare:** (free, vision, embedding)
-- **OpenRouter:** (paid, vision, function-calling)
-- **Replicate:** (paid)
-- **Ernie:** (paid, embedding, reranker, function-calling)
-- **Qianwen:** Qwen (paid, vision, embedding, function-calling)
-- **Moonshot:** (paid, function-calling)
-- **Deepseek:** (paid)
-- **ZhipuAI:** GLM-4 (paid, vision, function-calling)
-- **LingYiWanWu:** Yi-* (paid, vision)
+- **OpenAI:** GPT-4/GPT-3.5 (paid, chat, embedding, vision, function-calling)
+- **Gemini:** Gemini-1.5/Gemini-1.0 (free, paid, chat, embedding, vision, function-calling)
+- **Claude:** Claude-3.5/Claude-3 (paid, chat, vision, function-calling)
+- **Ollama:** (free, local, chat, embedding, vision, function-calling)
+- **Groq:** Llama-3.1/Gemma2 (free, chat, function-calling)
+- **Azure-OpenAI:** GPT-4/GPT-3.5 (paid, chat, embedding, vision, function-calling)
+- **VertexAI:** Gemini/Claude/Mistral (paid, chat, embedding, vision, function-calling)
+- **Bedrock:** Llama3.1/Claude3.5/Mistral/Command-R+ (paid, chat, embedding, function-calling)
+- **Mistral:** (paid, chat, embedding, function-calling)
+- **AI21:** (paid, chat, function-calling)
+- **Cohere:** Command-R/Command-R+ (paid, chat, embedding, reranker, function-calling)
+- **Perplexity:** Llama-3/Mixtral (paid, chat, online)
+- **Cloudflare:** (free, chat, embedding)
+- **OpenRouter:** (paid, chat, function-calling)
+- **Ernie:** (paid, chat, embedding, reranker, function-calling)
+- **Qianwen:** Qwen (paid, chat, embedding, vision, function-calling)
+- **Moonshot:** (paid, chat, function-calling)
+- **Deepseek:** (paid, chat, function-calling)
+- **ZhipuAI:** GLM-4 (paid, chat, embedding, vision, function-calling)
+- **LingYiWanWu:** Yi-Large (paid, chat, vision, function-calling)
+- **Jina:** (free, paid, embedding, reranker)
+- **VoyageAI:** (paid, embedding, reranker)
 - **OpenAI-Compatible Platforms** 
+
+### CMD & REPL
+
+AIChat supports both CMD and REPL modes to meet the needs and tastes of different users.
+
+| CMD                         | REPL                   |
+| --------------------------- | ---------------------- |
+| `-m, --model <model>`       | `.model <model>`       |
+| `-r, --role <role>`         | `.role <role>`         |
+| `    --prompt <prompt>`     | `.prompt <text>`       |
+| `-s, --session [<session>]` | `.session [<session>]` |
+| `-a, --agent <agent>`       | `.agent <agent>`       |
+| `-R, --rag <rag>`           | `.rag <rag>`           |
+| `-f, --file <file/url>`     | `.file <file/url>`     |
+| `    --info`                | `.info`                |
+
+
+```sh
+aichat                                          # Enter REPL 
+aichat Tell a joke                              # Generate response
+
+aichat -r role1                                 # Enter REPL with the role 'role1'
+aichat -r role1 hello world                     # Generate response with role 'role1'
+
+aichat -e install neovim                        # Execute command
+aichat -c fibonacci in js                       # Generate code
+
+cat data.toml | aichat -c to json > data.json   # Pipe Input/Output
+output=$(aichat -S $input)                      # Run in the script
+
+aichat -f data.txt                              # Use local file
+aichat -f image.png Recognize text              # Use image file
+aichat -f dir/file1 -f dir/file2 Summarize      # Use multi files
+aichat -f dir/ Summarize                        # Use local dir
+aichat -f https://example.com/readme Summarize  # Use website
+```
 
 ### Shell Assistant
 
-Simply input what you want to do in natural language, and aichat will prompt and run the command that achieves your intent.
+Supercharge your command line experience. Simply describe your desired actions in natural language, and let AIChat translate your requests into precise shell commands. 
 
 ![aichat-execute](https://github.com/sigoden/aichat/assets/4012553/f99bcd8f-26be-468f-a35e-197e65260f91)
 
-**AIChat is aware of OS and shell you are using, it will provide shell command for specific system you have.**
+**OS-Aware Intelligence:** AIChat tailors commands to your specific operating system and shell environment.
 
-### Role
+### Prompt & Role
 
-Customizable roles allow users to tailor the behavior of LLMs, enhancing productivity and ensuring the tool aligns with specific needs and workflows.
+Define custom roles to tailor LLM behaviors, enhancing interactions and boosting productivity.
 
 ![aichat-role](https://github.com/sigoden/aichat/assets/4012553/76004a01-3b29-4116-bbab-40b4978388f5)
 
-### Session
+### Session Management
 
-By default, AIChat behaves in a one-off request/response manner.
-With sessions, AIChat conducts context-aware conversations.
+Maintain context-aware conversations through sessions, ensuring continuity in interactions.
 
 ![aichat-session](https://github.com/sigoden/aichat/assets/4012553/1444c5c9-ea67-4ad2-80df-a76954e8cce0)
 
@@ -81,11 +117,11 @@ This will open your $EDITOR/$VISUAL ( or the editor you have setup in the config
 
 You can use this feature to steer the LLM replies. This is similar to the feature `edit` feature in **text-generation-webui** or **open-webui**. 
 
-### Retrieval-Augmented Generation (RAG)
+### RAG
 
-Seamlessly integrates document interactions into your chat experience.
+Integrate external documents into your AI conversations for more accurate and contextually relevant responses.
 
-![aichat-rag](https://github.com/sigoden/aichat/assets/4012553/6f3e5908-9c95-4d7d-aa9c-7e973ecf9354)
+![aichat-rag](https://github.com/user-attachments/assets/81b81409-460a-4aec-9e08-a3c3da5492d0)
 
 ### Function Calling
 
@@ -93,19 +129,19 @@ Function calling supercharges LLMs by connecting them to external tools and data
 
 We have created a new repository [https://github.com/sigoden/llm-functions](https://github.com/sigoden/llm-functions) to help you make the most of this feature.
 
-#### Tool Use
+#### AI Tools
 
-Here's a glimpse of How to use the tools.
+Integrate external tools to automate tasks, retrieve information, and perform actions directly within your workflow.
 
-![aichat-tool-use](https://github.com/sigoden/aichat/assets/4012553/c1b6b136-bbd3-4028-9b01-7d728390c0bf)
+![aichat-tool](https://github.com/user-attachments/assets/7459a111-7258-4ef0-a2dd-624d0f1b4f92)
 
-#### AI Agent
+#### AI Agents
+
+While tools excel at specific tasks, agents offer a more sophisticated approach to problem-solving and user interaction.
 
 Agent = Prompt (Role) + Tools (Function Callings) + Knowndge (RAG). It's also known as OpenAI's GPTs.
 
-Here's a glimpse of how to use the agents.
-
-![aichat-agent](https://github.com/sigoden/aichat/assets/4012553/7308a423-2ee5-4847-be1b-a53538bc98dc)
+![aichat-agent](https://github.com/user-attachments/assets/0b7e687d-e642-4e8a-b1c1-d2d9b2da2b6b)
 
 ### Local Server
 
@@ -115,6 +151,7 @@ AIChat comes with a built-in lightweight http server.
 $ aichat --serve
 Chat Completions API: http://127.0.0.1:8000/v1/chat/completions
 Embeddings API:       http://127.0.0.1:8000/v1/embeddings
+Rerank API:           http://127.0.0.1:8000/v1/rerank
 LLM Playground:       http://127.0.0.1:8000/playground
 LLM Arena:            http://127.0.0.1:8000/arena?num=2
 ```
@@ -151,14 +188,17 @@ AIChat supports custom dark and light themes, which highlight response text and 
 
 ![aichat-themes](https://github.com/sigoden/aichat/assets/4012553/29fa8b79-031e-405d-9caa-70d24fa0acf8)
 
-## Wiki
+## Documentation
 
+- [Configuration Guide](https://github.com/sigoden/aichat/wiki/Configuration-Guide)
 - [Command-Line Guide](https://github.com/sigoden/aichat/wiki/Command-Line-Guide)
 - [Chat-REPL Guide](https://github.com/sigoden/aichat/wiki/Chat-REPL-Guide)
 - [Role Guide](https://github.com/sigoden/aichat/wiki/Role-Guide)
+- [RAG Guide](https://github.com/sigoden/aichat/wiki/RAG-Guide)
 - [Environment Variables](https://github.com/sigoden/aichat/wiki/Environment-Variables)
 - [Custom Theme](https://github.com/sigoden/aichat/wiki/Custom-Theme)
 - [Custom REPL Prompt](https://github.com/sigoden/aichat/wiki/Custom-REPL-Prompt)
+- [FAQ](https://github.com/sigoden/aichat/wiki/FAQ)
 
 ## License
 

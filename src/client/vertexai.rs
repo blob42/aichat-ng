@@ -1,13 +1,14 @@
 use super::access_token::*;
+use super::claude::*;
+use super::openai::*;
 use super::*;
 
 use anyhow::{anyhow, bail, Context, Result};
-use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct VertexAIConfig {
@@ -17,7 +18,7 @@ pub struct VertexAIConfig {
     pub adc_file: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelData>,
-    pub patches: Option<ModelPatches>,
+    pub patch: Option<RequestPatch>,
     pub extra: Option<ExtraConfig>,
 }
 
@@ -29,68 +30,9 @@ impl VertexAIClient {
         ("project_id", "Project ID", true, PromptKind::String),
         ("location", "Location", true, PromptKind::String),
     ];
-
-    fn chat_completions_builder(
-        &self,
-        client: &ReqwestClient,
-        data: ChatCompletionsData,
-    ) -> Result<RequestBuilder> {
-        let project_id = self.get_project_id()?;
-        let location = self.get_location()?;
-        let access_token = get_access_token(self.name())?;
-
-        let base_url = format!("https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers");
-
-        let func = match data.stream {
-            true => "streamGenerateContent",
-            false => "generateContent",
-        };
-        let url = format!("{base_url}/google/models/{}:{func}", self.model.name());
-
-        let mut body = gemini_build_chat_completions_body(data, &self.model)?;
-        self.patch_chat_completions_body(&mut body);
-
-        debug!("VertexAI Chat Completions Request: {url} {body}");
-
-        let builder = client.post(url).bearer_auth(access_token).json(&body);
-
-        Ok(builder)
-    }
-
-    fn embeddings_builder(
-        &self,
-        client: &ReqwestClient,
-        data: EmbeddingsData,
-    ) -> Result<RequestBuilder> {
-        let project_id = self.get_project_id()?;
-        let location = self.get_location()?;
-        let access_token = get_access_token(self.name())?;
-
-        let base_url = format!("https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers");
-        let url = format!("{base_url}/google/models/{}:predict", self.model.name());
-
-        let task_type = match data.query {
-            true => "RETRIEVAL_DOCUMENT",
-            false => "QUESTION_ANSWERING",
-        };
-        let instances: Vec<_> = data
-            .texts
-            .into_iter()
-            .map(|v| json!({"task_type": task_type, "content": v}))
-            .collect();
-        let body = json!({
-            "instances": instances,
-        });
-
-        debug!("VertexAI Embeddings Request: {url} {body}");
-
-        let builder = client.post(url).bearer_auth(access_token).json(&body);
-
-        Ok(builder)
-    }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl Client for VertexAIClient {
     client_common_fns!();
 
@@ -100,8 +42,15 @@ impl Client for VertexAIClient {
         data: ChatCompletionsData,
     ) -> Result<ChatCompletionsOutput> {
         prepare_gcloud_access_token(client, self.name(), &self.config.adc_file).await?;
-        let builder = self.chat_completions_builder(client, data)?;
-        gemini_chat_completions(builder).await
+        let model = self.model();
+        let model_category = ModelCategory::from_str(model.name())?;
+        let request_data = prepare_chat_completions(self, data, &model_category)?;
+        let builder = self.request_builder(client, request_data, ApiType::ChatCompletions);
+        match model_category {
+            ModelCategory::Gemini => gemini_chat_completions(builder, model).await,
+            ModelCategory::Claude => claude_chat_completions(builder, model).await,
+            ModelCategory::Mistral => openai_chat_completions(builder, model).await,
+        }
     }
 
     async fn chat_completions_streaming_inner(
@@ -111,22 +60,119 @@ impl Client for VertexAIClient {
         data: ChatCompletionsData,
     ) -> Result<()> {
         prepare_gcloud_access_token(client, self.name(), &self.config.adc_file).await?;
-        let builder = self.chat_completions_builder(client, data)?;
-        gemini_chat_completions_streaming(builder, handler).await
+        let model = self.model();
+        let model_category = ModelCategory::from_str(model.name())?;
+        let request_data = prepare_chat_completions(self, data, &model_category)?;
+        let builder = self.request_builder(client, request_data, ApiType::ChatCompletions);
+        match model_category {
+            ModelCategory::Gemini => {
+                gemini_chat_completions_streaming(builder, handler, model).await
+            }
+            ModelCategory::Claude => {
+                claude_chat_completions_streaming(builder, handler, model).await
+            }
+            ModelCategory::Mistral => {
+                openai_chat_completions_streaming(builder, handler, model).await
+            }
+        }
     }
 
     async fn embeddings_inner(
         &self,
         client: &ReqwestClient,
-        data: EmbeddingsData,
+        data: &EmbeddingsData,
     ) -> Result<Vec<Vec<f32>>> {
         prepare_gcloud_access_token(client, self.name(), &self.config.adc_file).await?;
-        let builder = self.embeddings_builder(client, data)?;
-        embeddings(builder).await
+        let request_data = prepare_embeddings(self, data)?;
+        let builder = self.request_builder(client, request_data, ApiType::Embeddings);
+        embeddings(builder, self.model()).await
     }
 }
 
-pub async fn gemini_chat_completions(builder: RequestBuilder) -> Result<ChatCompletionsOutput> {
+fn prepare_chat_completions(
+    self_: &VertexAIClient,
+    data: ChatCompletionsData,
+    model_category: &ModelCategory,
+) -> Result<RequestData> {
+    let project_id = self_.get_project_id()?;
+    let location = self_.get_location()?;
+    let access_token = get_access_token(self_.name())?;
+
+    let base_url = format!("https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers");
+
+    let model_name = self_.model.name();
+
+    let url = match model_category {
+        ModelCategory::Gemini => {
+            let func = match data.stream {
+                true => "streamGenerateContent",
+                false => "generateContent",
+            };
+            format!("{base_url}/google/models/{model_name}:{func}")
+        }
+        ModelCategory::Claude => {
+            format!("{base_url}/anthropic/models/{model_name}:streamRawPredict")
+        }
+        ModelCategory::Mistral => {
+            let func = match data.stream {
+                true => "streamRawPredict",
+                false => "rawPredict",
+            };
+            format!("{base_url}/mistralai/models/{model_name}:{func}")
+        }
+    };
+
+    let body = match model_category {
+        ModelCategory::Gemini => gemini_build_chat_completions_body(data, &self_.model)?,
+        ModelCategory::Claude => {
+            let mut body = claude_build_chat_completions_body(data, &self_.model)?;
+            if let Some(body_obj) = body.as_object_mut() {
+                body_obj.remove("model");
+            }
+            body["anthropic_version"] = "vertex-2023-10-16".into();
+            body
+        }
+        ModelCategory::Mistral => {
+            let mut body = openai_build_chat_completions_body(data, &self_.model);
+            if let Some(body_obj) = body.as_object_mut() {
+                body_obj["model"] = strip_model_version(self_.model.name()).into();
+            }
+            body
+        }
+    };
+
+    let mut request_data = RequestData::new(url, body);
+
+    request_data.bearer_auth(access_token);
+
+    Ok(request_data)
+}
+
+fn prepare_embeddings(self_: &VertexAIClient, data: &EmbeddingsData) -> Result<RequestData> {
+    let project_id = self_.get_project_id()?;
+    let location = self_.get_location()?;
+    let access_token = get_access_token(self_.name())?;
+
+    let base_url = format!("https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers");
+    let url = format!("{base_url}/google/models/{}:predict", self_.model.name());
+
+    let instances: Vec<_> = data.texts.iter().map(|v| json!({"content": v})).collect();
+
+    let body = json!({
+        "instances": instances,
+    });
+
+    let mut request_data = RequestData::new(url, body);
+
+    request_data.bearer_auth(access_token);
+
+    Ok(request_data)
+}
+
+pub async fn gemini_chat_completions(
+    builder: RequestBuilder,
+    _model: &Model,
+) -> Result<ChatCompletionsOutput> {
     let res = builder.send().await?;
     let status = res.status();
     let data: Value = res.json().await?;
@@ -140,6 +186,7 @@ pub async fn gemini_chat_completions(builder: RequestBuilder) -> Result<ChatComp
 pub async fn gemini_chat_completions_streaming(
     builder: RequestBuilder,
     handler: &mut SseHandler,
+    _model: &Model,
 ) -> Result<()> {
     let res = builder.send().await?;
     let status = res.status();
@@ -177,7 +224,7 @@ pub async fn gemini_chat_completions_streaming(
     Ok(())
 }
 
-async fn embeddings(builder: RequestBuilder) -> Result<EmbeddingsOutput> {
+async fn embeddings(builder: RequestBuilder, _model: &Model) -> Result<EmbeddingsOutput> {
     let res = builder.send().await?;
     let status = res.status();
     let data: Value = res.json().await?;
@@ -354,20 +401,46 @@ pub fn gemini_build_chat_completions_body(
 
     if let Some(functions) = functions {
         // Gemini doesn't support functions with parameters that have empty properties, so we need to patch it.
-        let function_declarations: Vec<_> = functions.into_iter().map(|function| {
-            if function.parameters.is_empty_properties() {
-                json!({
-                    "name": function.name,
-                    "description": function.description,
-                })
-            } else {
-                json!(function)
-            }
-        }).collect();
+        let function_declarations: Vec<_> = functions
+            .into_iter()
+            .map(|function| {
+                if function.parameters.is_empty_properties() {
+                    json!({
+                        "name": function.name,
+                        "description": function.description,
+                    })
+                } else {
+                    json!(function)
+                }
+            })
+            .collect();
         body["tools"] = json!([{ "functionDeclarations": function_declarations }]);
     }
 
     Ok(body)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelCategory {
+    Gemini,
+    Claude,
+    Mistral,
+}
+
+impl FromStr for ModelCategory {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s.starts_with("gemini") {
+            Ok(ModelCategory::Gemini)
+        } else if s.starts_with("claude") {
+            Ok(ModelCategory::Claude)
+        } else if s.starts_with("mistral") || s.starts_with("codestral") {
+            Ok(ModelCategory::Mistral)
+        } else {
+            unsupported_model!(s)
+        }
+    }
 }
 
 pub async fn prepare_gcloud_access_token(
@@ -450,4 +523,11 @@ fn default_adc_file() -> Option<PathBuf> {
     path.push("gcloud");
     path.push("application_default_credentials.json");
     Some(path)
+}
+
+fn strip_model_version(name: &str) -> &str {
+    match name.split_once('@') {
+        Some((v, _)) => v,
+        None => name,
+    }
 }

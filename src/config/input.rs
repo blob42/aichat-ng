@@ -9,18 +9,12 @@ use crate::utils::{base64_encode, sha256, AbortSignal};
 
 use anyhow::{bail, Context, Result};
 use fancy_regex::Regex;
-use lazy_static::lazy_static;
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, fs::File, io::Read, path::Path};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const IMAGE_EXTS: [&str; 5] = ["png", "jpeg", "jpg", "webp", "gif"];
 
-lazy_static! {
+lazy_static::lazy_static! {
     static ref URL_RE: Regex = Regex::new(r"^[A-Za-z0-9_-]{2,}:/").unwrap();
 }
 
@@ -71,58 +65,24 @@ impl Input {
     pub async fn from_files(
         config: &GlobalConfig,
         text: &str,
-        files: Vec<String>,
+        paths: Vec<String>,
         role: Option<Role>,
     ) -> Result<Self> {
         let mut texts = vec![];
         if !text.is_empty() {
             texts.push(text.to_string());
         };
-        let mut medias = vec![];
-        let mut data_urls = HashMap::new();
-        let files: Vec<_> = files
-            .iter()
-            .map(|f| (f, is_image_ext(Path::new(f))))
-            .collect();
-        let multi_files = files.iter().filter(|(_, is_image)| !*is_image).count() > 1;
-        let loaders = config.read().document_loaders.clone();
         let spinner = create_spinner("Loading files").await;
-        for (file_item, is_image) in files {
-            match resolve_local_file(file_item) {
-                Some(file_path) => {
-                    if is_image {
-                        let data_url = read_media_to_data_url(&file_path)
-                            .with_context(|| format!("Unable to read media file '{file_item}'"))?;
-                        data_urls.insert(sha256(&data_url), file_path.display().to_string());
-                        medias.push(data_url)
-                    } else {
-                        let text = read_file(&file_path)
-                            .with_context(|| format!("Unable to read file '{file_item}'"))?;
-                        if multi_files {
-                            texts.push(format!("`{file_item}`:\n~~~~~~\n{text}\n~~~~~~"));
-                        } else {
-                            texts.push(text);
-                        }
-                    }
-                }
-                None => {
-                    if is_image {
-                        medias.push(file_item.to_string())
-                    } else {
-                        let (text, _) = fetch(&loaders, file_item)
-                            .await
-                            .with_context(|| format!("Failed to load '{file_item}'"))?;
-                        if multi_files {
-                            texts.push(format!("`{file_item}`:\n~~~~~~\n{text}\n~~~~~~"));
-                        } else {
-                            texts.push(text);
-                        }
-                    }
-                }
-            }
-        }
+        let ret = load_paths(config, paths).await;
         spinner.stop();
-
+        let (files, medias, data_urls) = ret?;
+        let files_len = files.len();
+        if files_len > 0 {
+            texts.push(String::new());
+        }
+        for (path, contents) in files {
+            texts.push(format!("`{path}`:\n\n{contents}\n"));
+        }
         let (role, with_session, with_agent) = resolve_role(&config.read(), role);
         Ok(Self {
             config: config.clone(),
@@ -198,36 +158,9 @@ impl Input {
         if !self.text.is_empty() {
             let rag = self.config.read().rag.clone();
             if let Some(rag) = rag {
-                let (top_k, min_score_vector_search, min_score_keyword_search) = {
-                    let config = self.config.read();
-                    (
-                        config.rag_top_k,
-                        config.rag_min_score_vector_search,
-                        config.rag_min_score_keyword_search,
-                    )
-                };
-                let rerank = match self.config.read().rag_reranker_model.clone() {
-                    Some(reranker_model_id) => {
-                        let min_score = self.config.read().rag_min_score_rerank;
-                        let rerank_model =
-                            Model::retrieve_reranker(&self.config.read(), &reranker_model_id)?;
-                        let rerank_client = init_client(&self.config, Some(rerank_model))?;
-                        Some((rerank_client, min_score))
-                    }
-                    None => None,
-                };
-                let embeddings = rag
-                    .search(
-                        &self.text,
-                        top_k,
-                        min_score_vector_search,
-                        min_score_keyword_search,
-                        rerank,
-                        abort_signal,
-                    )
-                    .await?;
-                let text = self.config.read().rag_template(&embeddings, &self.text);
-                self.patched_text = Some(text);
+                let result =
+                    Config::search_rag(&self.config, &rag, &self.text, abort_signal).await?;
+                self.patched_text = Some(result);
                 self.rag_name = Some(rag.name().to_string());
             }
         }
@@ -262,10 +195,10 @@ impl Input {
             bail!("The current model does not support vision. Is the model configured with `supports_vision: true`?");
         }
         let messages = self.build_messages()?;
-        self.config.read().model.guard_max_input_tokens(&messages)?;
+        model.guard_max_input_tokens(&messages)?;
         let temperature = self.role().temperature();
         let top_p = self.role().top_p();
-        let functions = self.config.read().select_functions(model, self.role());
+        let functions = self.config.read().select_functions(self.role());
         Ok(ChatCompletionsData {
             messages,
             temperature,
@@ -396,6 +329,49 @@ fn resolve_role(config: &Config, role: Option<Role>) -> (Role, bool, bool) {
     }
 }
 
+async fn load_paths(
+    config: &GlobalConfig,
+    paths: Vec<String>,
+) -> Result<(Vec<(String, String)>, Vec<String>, HashMap<String, String>)> {
+    let mut files = vec![];
+    let mut medias = vec![];
+    let mut data_urls = HashMap::new();
+    let loaders = config.read().document_loaders.clone();
+    let mut local_paths = vec![];
+    let mut remote_urls = vec![];
+    for path in paths {
+        match resolve_local_path(&path) {
+            Some(v) => local_paths.push(v),
+            None => remote_urls.push(path),
+        }
+    }
+    let local_files = expand_glob_paths(&local_paths).await?;
+    for file_path in local_files {
+        if is_image(&file_path) {
+            let data_url = read_media_to_data_url(&file_path)
+                .with_context(|| format!("Unable to read media file '{file_path}'"))?;
+            data_urls.insert(sha256(&data_url), file_path);
+            medias.push(data_url)
+        } else {
+            let text = read_file(&file_path)
+                .with_context(|| format!("Unable to read file '{file_path}'"))?;
+            files.push((file_path, text));
+        }
+    }
+    for file_url in remote_urls {
+        let (contents, extension) = fetch(&loaders, &file_url, true)
+            .await
+            .with_context(|| format!("Failed to load url '{file_url}'"))?;
+        if extension == MEDIA_URL_EXTENSION {
+            data_urls.insert(sha256(&contents), file_url);
+            medias.push(contents)
+        } else {
+            files.push((file_url, contents));
+        }
+    }
+    Ok((files, medias, data_urls))
+}
+
 pub fn resolve_data_url(data_urls: &HashMap<String, String>, data_url: String) -> String {
     if data_url.starts_with("data:") {
         let hash = sha256(&data_url);
@@ -408,39 +384,32 @@ pub fn resolve_data_url(data_urls: &HashMap<String, String>, data_url: String) -
     }
 }
 
-fn resolve_local_file(file: &str) -> Option<PathBuf> {
-    if let Ok(true) = URL_RE.is_match(file) {
+fn resolve_local_path(path: &str) -> Option<String> {
+    if let Ok(true) = URL_RE.is_match(path) {
         return None;
     }
-    let path = if let (Some(file), Some(home)) = (file.strip_prefix("~/"), dirs::home_dir()) {
-        home.join(file)
+    let new_path = if let (Some(file), Some(home)) = (path.strip_prefix("~/"), dirs::home_dir()) {
+        home.join(file).display().to_string()
     } else {
-        std::env::current_dir().ok()?.join(file)
+        path.to_string()
     };
-    Some(path)
+    Some(new_path)
 }
 
-fn is_image_ext(path: &Path) -> bool {
-    path.extension()
-        .map(|v| {
-            IMAGE_EXTS
-                .iter()
-                .any(|ext| *ext == v.to_string_lossy().to_lowercase())
-        })
+fn is_image(path: &str) -> bool {
+    get_patch_extension(path)
+        .map(|v| IMAGE_EXTS.contains(&v.as_str()))
         .unwrap_or_default()
 }
 
-fn read_media_to_data_url<P: AsRef<Path>>(image_path: P) -> Result<String> {
-    let image_path = image_path.as_ref();
-    let mime_type = match image_path.extension().and_then(|v| v.to_str()) {
-        Some(extension) => match extension {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "webp" => "image/webp",
-            "gif" => "image/gif",
-            _ => bail!("Unsupported media type"),
-        },
-        None => bail!("Unknown media type"),
+fn read_media_to_data_url(image_path: &str) -> Result<String> {
+    let extension = get_patch_extension(image_path).unwrap_or_default();
+    let mime_type = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => bail!("Unexpected media type"),
     };
     let mut file = File::open(image_path)?;
     let mut buffer = Vec::new();

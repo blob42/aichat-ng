@@ -79,20 +79,25 @@ test-server() {
 }
 
 OPENAI_COMPATIBLE_PLATFORMS=( \
-  openai,gpt-3.5-turbo,https://api.openai.com/v1 \
-  anyscale,meta-llama/Meta-Llama-3-8B-Instruct,https://api.endpoints.anyscale.com/v1 \
-  deepinfra,meta-llama/Meta-Llama-3-8B-Instruct,https://api.deepinfra.com/v1/openai \
+  openai,gpt-4o-mini,https://api.openai.com/v1 \
+  ai21,jamba-1.5-mini,https://api.ai21.com/studio/v1 \
+  cloudflare,@cf/meta/llama-3.1-8b-instruct, \
+  deepinfra,meta-llama/Meta-Llama-3.1-8B-Instruct,https://api.deepinfra.com/v1/openai \
   deepseek,deepseek-chat,https://api.deepseek.com \
-  fireworks,accounts/fireworks/models/llama-v3-8b-instruct,https://api.fireworks.ai/inference/v1 \
+  fireworks,accounts/fireworks/models/llama-v3p1-8b-instruct,https://api.fireworks.ai/inference/v1 \
+  github,gpt-4o-mini,https://models.inference.ai.azure.com \
   groq,llama3-8b-8192,https://api.groq.com/openai/v1 \
-  mistral,mistral-small-latest,https://api.mistral.ai/v1 \
-  moonshot,moonshot-v1-8k,https://api.moonshot.cn/v1 \
-  openrouter,meta-llama/llama-3-8b-instruct,https://openrouter.ai/api/v1 \
-  octoai,meta-llama-3-8b-instruct,https://text.octoai.run/v1 \
-  perplexity,llama-3-8b-instruct,https://api.perplexity.ai \
-  together,meta-llama/Llama-3-8b-chat-hf,https://api.together.xyz/v1 \
-  zhipuai,glm-4-0520,https://open.bigmodel.cn/api/paas/v4 \
+  huggingface,meta-llama/Meta-Llama-3-8B-Instruct,https://api-inference.huggingface.co/v1 \
   lingyiwanwu,yi-large,https://api.lingyiwanwu.com/v1 \
+  mistral,open-mistral-nemo,https://api.mistral.ai/v1 \
+  moonshot,moonshot-v1-8k,https://api.moonshot.cn/v1 \
+  openrouter,openai/gpt-4o-mini,https://openrouter.ai/api/v1 \
+  ollama,llama3.1:latest,http://localhost:11434/v1 \
+  perplexity,llama-3.1-8b-instruct,https://api.perplexity.ai \
+  qianwen,qwen-turbo,https://dashscope.aliyuncs.com/compatible-mode/v1 \
+  siliconflow,meta-llama/Meta-Llama-3.1-8B-Instruct,https://api.siliconflow.cn/v1 \
+  together,meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo,https://api.together.xyz/v1 \
+  zhipuai,glm-4-0520,https://open.bigmodel.cn/api/paas/v4 \
 )
 
 # @cmd Chat with any LLM api 
@@ -108,7 +113,7 @@ chat() {
     fi
     for platform_config in "${OPENAI_COMPATIBLE_PLATFORMS[@]}"; do
         if [[ "$argc_platform" == "${platform_config%%,*}" ]]; then
-            api_base="${platform_config##*,}"
+            _retrieve_api_base
             break
         fi
     done
@@ -138,7 +143,7 @@ chat() {
 models() {
     for platform_config in "${OPENAI_COMPATIBLE_PLATFORMS[@]}"; do
         if [[ "$argc_platform" == "${platform_config%%,*}" ]]; then
-            api_base="${platform_config##*,}"
+            _retrieve_api_base
             break
         fi
     done
@@ -146,7 +151,7 @@ models() {
         env_prefix="$(echo "$argc_platform" | tr '[:lower:]' '[:upper:]')"
         api_key_env="${env_prefix}_API_KEY"
         api_key="${!api_key_env}" 
-        _openai_models
+        _retrieve_models
     else
         argc models-$argc_platform
     fi
@@ -170,7 +175,7 @@ chat-openai-compatible() {
 # @option --api-base! $$
 # @option --api-key! $$
 models-openai-compatible() {
-    _openai_models
+    _retrieve_models
 }
 
 # @cmd Chat with azure-openai api
@@ -247,17 +252,6 @@ models-cohere() {
 
 }
 
-# @cmd Chat with ollama api
-# @option -m --model=codegemma $OLLAMA_MODEL
-# @flag -S --no-stream
-# @arg text~
-chat-ollama() {
-    _wrapper curl -i http://localhost:11434/api/chat \
--X POST \
--H 'Content-Type: application/json' \
--d "$(_build_body ollama "$@")"
-}
-
 # @cmd Chat with vertexai api
 # @env require-tools gcloud
 # @env VERTEXAI_PROJECT_ID!
@@ -279,99 +273,6 @@ chat-vertexai() {
 -d "$(_build_body vertexai "$@")" 
 }
 
-# @cmd Chat with vertexai-claude api
-# @env require-tools gcloud
-# @env VERTEXAI_PROJECT_ID!
-# @env VERTEXAI_LOCATION!
-# @option -m --model=claude-3-haiku@20240307 $VERTEXAI_CLAUDE_MODEL
-# @flag -S --no-stream
-# @arg text~
-chat-vertexai-claude() {
-    api_key="$(gcloud auth print-access-token)"
-    url=https://$VERTEXAI_LOCATION-aiplatform.googleapis.com/v1/projects/$VERTEXAI_PROJECT_ID/locations/$VERTEXAI_LOCATION/publishers/anthropic/models/$argc_model:streamRawPredict
-    _wrapper curl -i $url \
--X POST \
--H "Authorization: Bearer $api_key" \
--H 'Content-Type: application/json' \
--d "$(_build_body vertexai-claude "$@")" 
-}
-
-# @cmd Chat with bedrock api
-# @meta require-tools aws
-# @option -m --model=mistral.mistral-7b-instruct-v0:2 $BEDROCK_MODEL
-# @env AWS_REGION=us-east-1
-chat-bedrock() {
-    file="$(mktemp)"
-    case "$argc_model" in
-        mistral.* | meta.*)
-            body='{"prompt":"'"$*"'"}'
-            ;;
-        anthropic.*)
-            body="$(_build_body bedrock-claude "$@")"
-            ;;
-        *)
-            _die "Invalid model: $argc_model"
-            ;;
-    esac
-
-    _wrapper aws bedrock-runtime invoke-model \
-        --model-id $argc_model \
-        --region $AWS_REGION \
-        --body "$(echo "$body" | base64)" \
-        "$file"
-    cat "$file"
-}
-
-# @cmd Chat with cloudflare api
-# @env CLOUDFLARE_API_KEY!
-# @option -m --model=@cf/meta/llama-3-8b-instruct $CLOUDFLARE_MODEL
-# @flag -S --no-stream
-# @arg text~
-chat-cloudflare() {
-    url="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/ai/run/$argc_model"
-    _wrapper curl -i "$url" \
--X POST \
--H "Authorization: Bearer $CLOUDFLARE_API_KEY" \
--d "$(_build_body cloudflare "$@")" 
-}
-
-# @cmd Chat with replicate api
-# @env REPLICATE_API_KEY!
-# @option -m --model=meta/meta-llama-3-8b-instruct $REPLICATE_MODEL
-# @flag -S --no-stream
-# @arg text~
-chat-replicate() {
-    url="https://api.replicate.com/v1/models/$argc_model/predictions"
-    res="$(_wrapper curl -s "$url" \
--X POST \
--H "Authorization: Bearer $REPLICATE_API_KEY" \
--H "Content-Type: application/json" \
--d "$(_build_body replicate "$@")" \
-)"
-    echo "$res"
-    if [[ -n "$argc_no_stream" ]]; then
-        prediction_url="$(echo "$res" | jq -r '.urls.get')"
-        while true; do
-            output="$(_wrapper curl -s -H "Authorization: Bearer $REPLICATE_API_KEY" "$prediction_url")"
-            prediction_status=$(printf "%s" "$output" | jq -r .status)
-            if [ "$prediction_status"=="succeeded" ]; then
-                echo "$output"
-                break
-            fi
-            if [ "$prediction_status"=="failed" ]; then
-                exit 1
-            fi
-            sleep 2
-        done
-    else
-        stream_url="$(echo "$res" | jq -r '.urls.stream')"
-    _wrapper curl -i --no-buffer "$stream_url" \
--H "Accept: text/event-stream" \
-
-    fi
-
-}
-
 # @cmd Chat with ernie api
 # @meta require-tools jq
 # @env ERNIE_API_KEY!
@@ -387,27 +288,6 @@ chat-ernie() {
 -d "$(_build_body ernie "$@")"
 }
 
-
-# @cmd Chat with qianwen api
-# @env QIANWEN_API_KEY!
-# @option -m --model=qwen-turbo $QIANWEN_MODEL
-# @flag -S --no-stream
-# @arg text~
-chat-qianwen() {
-    stream_args="-H X-DashScope-SSE:enable"
-    parameters_args='{"incremental_output": true}'
-    if [[ -n "$argc_no_stream" ]]; then
-        stream_args=""
-        parameters_args='{}'
-    fi
-    url=https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation
-    _wrapper curl -i "$url" \
--X POST \
--H "Authorization: Bearer $QIANWEN_API_KEY" \
--H 'Content-Type: application/json' $stream_args  \
--d "$(_build_body qianwen "$@")"
-}
-
 _argc_before() {
     stream="true"
     if [[ -n "$argc_no_stream" ]]; then
@@ -415,12 +295,23 @@ _argc_before() {
     fi
 }
 
-_openai_models() {
+_retrieve_models() {
     api_base="${api_base:-"$argc_api_base"}"
     api_key="${api_key:-"$argc_api_key"}"
     _wrapper curl "$api_base/models" \
 -H "Authorization: Bearer $api_key" \
 
+}
+
+_retrieve_api_base() {
+    api_base="${platform_config##*,}"
+    if [[ -z "$api_base" ]]; then
+        key="$(echo $argc_platform |  tr '[:lower:]' '[:upper:]')_API_BASE"
+        api_base="${!key}"
+        if [[ -z "$api_base" ]]; then
+            _die "Miss api_base for $argc_platform; please set $key"
+        fi
+    fi
 }
 
 _choice_model() {
@@ -438,7 +329,7 @@ _choice_platform() {
 }
 
 _choice_client() {
-    printf "%s\n" openai gemini claude cohere ollama azure-openai vertexai bedrock cloudflare replicate ernie qianwen moonshot
+    printf "%s\n" openai gemini claude cohere ollama azure-openai vertexai bedrock cloudflare ernie qianwen moonshot
 }
 
 _choice_openai_compatible_platform() {
@@ -453,16 +344,15 @@ _build_body() {
         file="${BODY_FILE:-"tmp/body/$1.json"}"
         if [[ -f "$file" ]]; then
             cat "$file" | \
-            sed \
-                -e 's/"model": ".*"/"model": "'"$argc_model"'"/' \
-                -e 's/"stream": \(true\|false\)/"stream": '$stream'/' \
-
+            sed -E \
+                -e 's%"model": ".*"%"model": "'"$argc_model"'"%' \
+                -e 's%"stream": (true|false)%"stream": '$stream'%' \
 
         fi
     else
         shift
         case "$kind" in
-        openai|ollama)
+        openai)
             echo '{
     "model": "'$argc_model'",
     "messages": [
@@ -495,20 +385,6 @@ _build_body() {
 }'
 
             ;;
-        vertexai-claude|bedrock-claude)
-            echo '{
-    "anthropic_version": "vertex-2023-10-16",
-    "messages": [
-        {
-            "role": "user",
-            "content": "'"$*"'"
-        }
-    ],
-    "max_tokens": 4096,
-    "stream": '$stream'
-}'
-
-            ;;
         gemini|vertexai)
             echo '{
     "contents": [{
@@ -522,7 +398,7 @@ _build_body() {
     "safetySettings":[{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_ONLY_HIGH"},{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_ONLY_HIGH"},{"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"BLOCK_ONLY_HIGH"},{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_ONLY_HIGH"}]
 }'
             ;;
-        ernie|cloudflare)
+        ernie)
             echo '{
     "messages": [
         {
@@ -531,28 +407,6 @@ _build_body() {
         }
     ],
     "stream": '$stream'
-}'
-            ;;
-        replicate)
-            echo '{
-    "stream": '$stream',
-	"input": {
-      "prompt": "'"$*"'"
-	}
-}'
-            ;;
-        qianwen)
-            echo '{
-    "model": "'$argc_model'",
-    "parameters": '"$parameters_args"',
-    "input":{
-        "messages": [
-            {
-                "role": "user",
-                "content": "'"$*"'"
-            }
-        ]
-    }
 }'
             ;;
         *)

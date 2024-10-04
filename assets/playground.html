@@ -198,6 +198,8 @@
 
     .chat-message-content .error {
       color: red;
+      background: none;
+      padding: 0;
     }
 
     .chat-message-content .message-text {
@@ -251,7 +253,8 @@
     }
 
     .copy-message-btn,
-    .regenerate-message-btn {
+    .regenerate-message-btn,
+    .tts-message-btn {
       top: 0.7rem;
       right: 0.7rem;
       cursor: pointer;
@@ -260,7 +263,8 @@
     }
 
     .copy-message-btn svg,
-    .regenerate-message-btn svg {
+    .regenerate-message-btn svg,
+    .tts-message-btn svg {
       width: 1rem;
       height: 1rem;
     }
@@ -432,6 +436,11 @@
     }
 
     @media screen and (max-width: 768px) {
+      body {
+        height: calc(100vh - 56px);
+        height: 100dvh;
+      }
+
       .container {
         padding: 3px;
       }
@@ -493,18 +502,17 @@
       </div>
       <div class="settings">
         <div class="control">
-          <div class="checkbox-group">
-            <label for="compress_threshold">Session Compress Threshold</label>
-            <input type="checkbox" id="enable_session" title="Enable Session?" x-model="settings.enable_session"
-              :disabled="sessionMode">
-          </div>
-          <input type="number" :disabled="!settings.enable_session" id="compress_threshold"
-            x-model="settings.compress_threshold">
+          <label for="role">RAG</label>
+          <select id="role" x-model="settings.rag" :disabled="sessionMode">
+            <template x-for="rag in rags">
+              <option :value="rag" :selected="rag == settings.rag" x-text="rag"></option>
+            </template>
+          </select>
         </div>
 
         <div class="control">
           <label for="role">Role</label>
-          <select id="role" x-model="settings.role" :disabled="sessionMode" @change="handleRoleChange">
+          <select id="role" x-model="settings.role" :disabled="sessionMode">
             <template x-for="role in roles">
               <option :value="role.name" :selected="role.name == settings.role" x-text="role.name"></option>
             </template>
@@ -518,7 +526,7 @@
 
         <div class="control">
           <label for="max_output_tokens"
-            x-text="'Max Output Tokens' + (currentModel.max_output_token ? ' [1, ' + currentModel.max_output_token + ']' : '')">Max
+            x-text="'Max Output Tokens' + (modelData.max_output_token ? ' [1, ' + modelData.max_output_token + ']' : '')">Max
             Output Tokens</label>
           <input type="number" id="max_output_tokens" x-model="settings.max_output_tokens">
         </div>
@@ -537,9 +545,9 @@
     </div>
     <div class="main-panel" x-ref="main-panel">
       <div class="chat-header">
-        <select id="model" x-model="settings.model_id">
+        <select id="model" x-model="settings.model">
           <template x-for="model in models" :key="model.id">
-            <option :value="model.id" :selected="model.id == settings.model_id" x-text="model.id"></option>
+            <option :value="model.id" :selected="model.id == settings.model" x-text="model.id"></option>
           </template>
         </select>
         <div class="toolbar">
@@ -618,6 +626,16 @@
                       </svg>
                     </div>
                   </template>
+                  <template
+                    x-if="message.state == 'succeed' && !!window.speechSynthesis">
+                    <div class="tts-message-btn" @click="handleTTSMessage(message.content)" title="Text to speech">
+                      <svg fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303z"/>
+                        <path d="M10.121 12.596A6.48 6.48 0 0 0 12.025 8a6.48 6.48 0 0 0-1.904-4.596l-.707.707A5.48 5.48 0 0 1 11.025 8a5.48 5.48 0 0 1-1.61 3.89z"/>
+                        <path d="M10.025 8a4.5 4.5 0 0 1-1.318 3.182L8 10.475A3.5 3.5 0 0 0 9.025 8c0-.966-.392-1.841-1.025-2.475l.707-.707A4.5 4.5 0 0 1 10.025 8M7 4a.5.5 0 0 0-.812-.39L3.825 5.5H1.5A.5.5 0 0 0 1 6v4a.5.5 0 0 0 .5.5h2.325l2.363 1.89A.5.5 0 0 0 7 12zM4.312 6.39 6 5.04v5.92L4.312 9.61A.5.5 0 0 0 4 9.5H2v-3h2a.5.5 0 0 0 .312-.11"/>
+                      </svg>
+                    </div>
+                  </template>
                 </div>
               </template>
             </div>
@@ -633,7 +651,7 @@
       <div class="input-panel">
         <div class="input-panel-inner">
           <textarea id="chat-input" x-model="input" x-ref="input" @keydown.enter="handleEnterKeydown"
-            placeholder="Ask Anything"></textarea>
+            placeholder="Ask Anything" autofocus></textarea>
           <div class="input-image-bar" x-show="images.length > 0">
             <template x-for="(image, index) in images">
               <div class="input-image-item">
@@ -662,7 +680,7 @@
           </template>
           <template x-if="!asking">
             <div class="input-toolbox">
-              <div class="image-btn" x-show="currentModel.supports_vision">
+              <div class="image-btn" x-show="modelData.supports_vision">
                 <input type="file" multiple accept=".jpg,.jpeg,.png,.webp" @change="handleImageUpload">
                 <svg fill="currentColor" viewBox="0 0 16 16">
                   <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0" />
@@ -685,13 +703,14 @@
     <div id="toast" class="toast"></div>
   </div>
   <script>
-    const QUERY = parseQueryString(location.search);
+    const QUERY = parseQueryString();
     const API_BASE = QUERY.api_base || "./v1";
     const API_KEY = QUERY.api_key || "";
     const CHAT_COMPLETIONS_URL = API_BASE + "/chat/completions";
     const MODELS_API = API_BASE + "/models";
     const ROLES_API = API_BASE + "/roles";
-    const SETTINGS_STORAGE_KEY = "__settings__";
+    const RAGS_API = API_BASE + "/rags";
+    const SEARCH_RAG_API = API_BASE + "/rags/search";
 
     document.addEventListener("alpine:init", () => {
       setupMarked();
@@ -701,33 +720,22 @@
     function setupApp() {
       let msgIdx = 0;
       let defaultSettings = {
-        model_id: "default",
-        role: "",
+        model: QUERY.model || "default",
+        rag: QUERY.rag || "",
+        role: QUERY.role || "",
         prompt: "",
-        max_output_tokens: null,
-        temperature: null,
-        top_p: null,
-        enable_session: true,
-        compress_threshold: 4000,
+        max_output_tokens: parseInt(QUERY.max_output_tokens) || null,
+        temperature: QUERY.temperature ? parseFloat(QUERY.temperature) : null,
+        top_p: QUERY.top_p ? parseFloat(QUERY.top_p) : null,
       };
-      try {
-        const persistSettings = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY)) || {};
-        const sanitizedPersistSettings = Object.keys(defaultSettings).reduce((acc, cur) => {
-          if (persistSettings.hasOwnProperty(cur)) {
-            acc[cur] = persistSettings[cur];
-          }
-          return acc;
-        }, {});
-        defaultSettings = { ...defaultSettings, ...sanitizedPersistSettings };
-      } catch { }
 
       Alpine.data("app", () => ({
         models: [],
+        rags: [""],
         roles: [{ name: "", prompt: "" }],
-        currentModel: {},
+        modelData: {},
         messages: [],
         hoveredMessageIndex: null,
-        skipMessageId: -1,
         input: "",
         images: [],
         asking: false,
@@ -746,20 +754,30 @@
               toast("No model available");
               console.error("Failed to load models", err);
             }),
+            fetchJSON(RAGS_API).then(rags => {
+              this.rags.push(...rags);
+            }).catch(() => { }),
             fetchJSON(ROLES_API).then(roles => {
               this.roles.push(...roles.filter(v => !!v.prompt));
             }).catch(() => { }),
           ])
           this.$watch("input", () => this.autosizeInput(this.$refs.input));
-          this.$watch("settings", () => {
-            localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(this.settings));
-          });
-          this.$watch("settings.model_id", () => this.handleModelIdChange());
-          this.handleModelIdChange();
-        },
-
-        handleRoleChange(event) {
-          this.settings.prompt = this.roles.find(role => role.name === event.target.value).prompt;
+          this.$watch("settings", () => this.updateUrl());
+          this.$watch("settings.model", () => this.handleModelChange());
+          if (this.models.find(model => model.id === this.settings.model)) {
+            this.handleModelChange();
+          } else {
+            this.settings.model = "default";
+          }
+          if (!this.rags.find(rag => rag === this.settings.rag)) {
+            this.settings.rag = "";
+          }
+          this.$watch("settings.role", () => this.handleRoleChange())
+          if (this.roles.find(role => role.name === this.settings.role)) {
+            this.handleRoleChange();
+          } else {
+            this.settings.role = "";
+          }
         },
 
         handleAsk() {
@@ -816,13 +834,30 @@
           this.ask();
         },
 
+        /**
+         * @param {string} messageToUtter
+         */
+        handleTTSMessage(messageToUtter) {
+          if (!!window.speechSynthesis) {
+            if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+              window.speechSynthesis.cancel();
+            } else {
+              let utterance = new SpeechSynthesisUtterance(messageToUtter);
+              window.speechSynthesis.speak(utterance);
+            }
+          }
+        },
 
         handleCancelAsk() {
           this.askAbortController?.abort();
         },
 
-        handleModelIdChange() {
-          this.currentModel = retrieveModel(this.models, this.settings.model_id);
+        handleModelChange() {
+          this.modelData = retrieveModel(this.models, this.settings.model);
+        },
+
+        handleRoleChange() {
+          this.settings.prompt = this.roles.find(role => role.name === this.settings.role).prompt;
         },
 
         handleScrollChatBody(event) {
@@ -904,6 +939,18 @@
           event.target.value = "";
         },
 
+        updateUrl() {
+          const newUrl = new URL(location.href);
+          ["model", "rag", "role", "max_output_tokens", "temperature", "top_p"].forEach(key => {
+            if (this.settings[key] || typeof this.settings[key] === "number") {
+              newUrl.searchParams.set(key, this.settings[key]);
+            } else {
+              newUrl.searchParams.delete(key);
+            }
+          });
+          history.replaceState(null, '', newUrl.toString());
+        },
+
         autoScrollChatBodyToBottom() {
           if (this.shouldScrollChatBodyToBottom) {
             let $chatBody = this.$refs["chat-body"];
@@ -929,6 +976,12 @@
           const body = this.buildBody();
           let succeed = false;
           try {
+            if (this.settings.rag) {
+              const message = body.messages[body.messages.length - 1];
+              if (message.role === "user" && typeof message.content === "string") {
+                message.content = await this.searchRag(this.settings.rag, message.content);
+              }
+            }
             const stream = await fetchChatCompletions(CHAT_COMPLETIONS_URL, body, this.askAbortController.signal)
             for await (const chunk of stream) {
               lastMessage.state = "streaming";
@@ -950,34 +1003,28 @@
             lastMessage.html = renderMarkdown(lastMessage.content, lastMessage.error);
           }
           if (succeed) {
-            if (this.settings.enable_session) {
-              this.sessionMode = true;
-            }
-            const countTokens = [...body.messages.map(v => v.content), lastMessage.content].reduce((acc, cur) => acc + estimateTokenLength(cur), 0);
-            if (countTokens > this.settings.compress_threshold) {
-              const { messages } = body;
-              messages.push({ role: "assistant", content: lastMessage.content });
-              messages.push({ role: "user", content: "Summarize the discussion briefly in 200 words or less to use as a prompt for future context." });
-              try {
-                toast("Compressing session...", 30000);
-                const iter = await fetchChatCompletions(CHAT_COMPLETIONS_URL, { model: this.settings.model_id, messages, stream: false });
-                const summarizedData = await iter.next();
-                const summarizedText = summarizedData?.value?.choices[0]?.message?.content;
-                this.summary = "This is a summary of the chat history as a recap: " + summarizedText;
-                this.skipMessageId = lastMessage.id;
-                toast("Session compressed!");
-              } catch (err) {
-                toast("❌ Failed to compress session.");
-                console.error("Failed to compress session", err);
-              }
-            }
+            this.sessionMode = true;
           }
           this.asking = false;
         },
 
+        async searchRag(name, input) {
+          const res = await fetch(SEARCH_RAG_API, {
+            method: "POST",
+            headers: getHeaders(),
+            signal: this.askAbortController.signal,
+            body: JSON.stringify({
+              name,
+              input
+            })
+          });
+          const data = await res.json();
+          return data.data;
+        },
+
         buildBody() {
           let messages = [];
-          for ([userMessage, assistantMessage] of chunkArray(this.messages.filter(v => v.id > this.skipMessageId), 2)) {
+          for ([userMessage, assistantMessage] of chunkArray(this.messages, 2)) {
             if (assistantMessage.state == "failed") {
               continue;
             } else if (assistantMessage.state == "loading") {
@@ -985,7 +1032,7 @@
                 role: userMessage.role,
                 content: userMessage.content,
               });
-            } else if (this.settings.enable_session) {
+            } else {
               messages.push({
                 role: userMessage.role,
                 content: userMessage.content,
@@ -1023,7 +1070,7 @@
             }
           }
           const body = {
-            model: this.settings.model_id,
+            model: this.settings.model,
             messages: messages,
             stream: true,
           };
@@ -1032,7 +1079,7 @@
               body[body_key || setting_key] = this.settings[setting_key];
             }
           });
-          const { max_output_token, require_max_tokens } = this.currentModel;
+          const { max_output_token, require_max_tokens } = this.modelData;
           if (!body["max_tokens"] && require_max_tokens) {
             body["max_tokens"] = max_output_token;
           };
@@ -1146,7 +1193,7 @@
         const index = text.indexOf(search);
 
         if (index !== -1) {
-          if (system == null) {
+          if (system === null) {
             system = text.slice(0, index);
           } else {
             parts.push(text.slice(0, index));
@@ -1155,7 +1202,7 @@
           text = text.slice(index + search.length);
         } else {
           if (text.trim()) {
-            if (system == null) {
+            if (system === null) {
               system = text;
             } else {
               parts.push(text);
@@ -1196,29 +1243,6 @@
       });
     }
 
-    function estimateTokenLength(input) {
-      let tokenLength = 0;
-      if (Array.isArray(input)) {
-        input = input.map(v => v.text || "").join("");
-      }
-
-      for (let i = 0; i < input.length; i++) {
-        const charCode = input.charCodeAt(i);
-
-        if (charCode < 128) {
-          if (charCode <= 122 && charCode >= 65) {
-            tokenLength += 0.25;
-          } else {
-            tokenLength += 0.5;
-          }
-        } else {
-          tokenLength += 1.5;
-        }
-      }
-
-      return tokenLength;
-    }
-
     function setupMarked() {
       const renderer = new marked.Renderer();
       renderer.code = (code, language) => {
@@ -1252,20 +1276,13 @@
       return input.replace(/([&<>'"])/g, char => escapeMap[char]);
     }
 
-    function parseQueryString(queryString) {
-      const params = {};
-      if (!queryString) {
-        return params;
-      }
-      const queries = queryString[0] === '?' ? queryString.substring(1) : queryString;
-      const pairs = queries.split('&');
-
-      pairs.forEach(pair => {
-        const [key, value] = pair.split('=');
-        params[decodeURIComponent(key)] = decodeURIComponent(value ? value.replace(/\+/g, ' ') : '');
+    function parseQueryString() {
+      const params = new URLSearchParams(location.search);
+      const queryObject = {};
+      params.forEach((value, key) => {
+        queryObject[key] = value;
       });
-
-      return params;
+      return queryObject;
     }
 
     function chunkArray(array, chunkSize) {
@@ -1277,7 +1294,7 @@
     }
 
     function renderMarkdown(text, error = '') {
-      return marked.marked(text) + (error ? `<p class="error">${error}</p>` : '');
+      return marked.marked(text) + (error ? `<pre class="error">${error}</pre>` : '');
     }
   </script>
 </body>

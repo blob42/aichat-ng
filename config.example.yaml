@@ -4,11 +4,19 @@ temperature: null                # Set default temperature parameter
 top_p: null                      # Set default top-p parameter, range (0, 1)
 
 # ---- behavior ----
+stream: true                     # Controls whether to use the stream-style API.
 save: true                       # Indicates whether to persist the message
 keybindings: emacs               # Choose keybinding style (emacs, vi)
-buffer_editor: null              # Command used to edit the current input with ctrl+o, env: EDITOR
+editor: null                     # Specifies the command used to edit input buffer or session. (e.g. vim, emacs, nano).
 wrap: no                         # Controls text wrapping (no, auto, <max-width>)
 wrap_code: false                 # Enables or disables wrapping of code blocks
+
+# ---- function-calling ----
+# Visit https://github.com/sigoden/llm-functions for setup instructions
+function_calling: true           # Enables or disables function calling (Globally).
+mapping_tools:                   # Alias for a tool or toolset
+  fs: 'fs_cat,fs_ls,fs_mkdir,fs_rm,fs_write'
+use_tools: null                  # Which tools to use by default. (e.g. 'fs,web_search')
 
 # ---- prelude ----
 prelude: null                    # Set a default role or session to start with (e.g. role:<name>, session:<name>)
@@ -16,7 +24,7 @@ repl_prelude: null               # Overrides the `prelude` setting specifically 
 agent_prelude: null              # Set a session to use when starting a agent. (e.g. temp, default)
 
 # ---- session ----
-# Controls the persistence of the session, if null, asking the user
+# Controls the persistence of the session. if true, auto save; if false, not save; if null, asking the user
 save_session: null
 # Compress session when token count reaches or exceeds this threshold
 compress_threshold: 4000
@@ -25,33 +33,8 @@ summarize_prompt: 'Summarize the discussion briefly in 200 words or less to use 
 # Text prompt used for including the summary of the entire session
 summary_prompt: 'This is a summary of the chat history as a recap: '
 
-# Define document loaders to control how `.file`/`--file` and RAG load files of specific formats.
-document_loaders:
-  # You can add custom loaders using the following syntax:
-  #   <file-extension>: <command-to-load-the-file>
-  # Note: Use `$1` for input filepath and `$2` for output filepath. If `$2` is not provided, output to stdout.
-  pdf: 'pdftotext $1 -'                         # Load .pdf file, see https://poppler.freedesktop.org
-  docx: 'pandoc --to plain $1'                  # Load .docx file
-  # xlsx: 'ssconvert $1 $2'                     # Load .xlsx file
-  # html: 'pandoc --to plain $1'                # Load .html file
-  # recursive_url: 'rag-crawler $1 $2'          # Load websites, see https://github.com/sigoden/rag-crawler
-
-# ---- function-calling & agent ----
-# Controls the function calling feature. For setup instructions, visit https://github.com/sigoden/llm-functions
-function_calling: true
-# Regex for seletecting dangerous functions
-# User confirmation is required when executing these functions
-# e.g. 'execute_command|execute_js_code' 'execute_.*'
-dangerously_functions_filter: null
-# Per-Agent configuration
-agents:
-  - name: todo-sh
-    model: null
-    temperature: null
-    top_p: null
-    dangerously_functions_filter: null
-
 # ---- RAG ----
+# See [RAG-Guide](https://github.com/sigoden/aichat/wiki/RAG-Guide) for more details.
 rag_embedding_model: null                   # Specifies the embedding model to use
 rag_reranker_model: null                    # Specifies the rerank model to use
 rag_top_k: 4                                # Specifies the number of documents to retrieve
@@ -59,7 +42,6 @@ rag_chunk_size: null                        # Specifies the chunk size
 rag_chunk_overlap: null                     # Specifies the chunk overlap
 rag_min_score_vector_search: 0              # Specifies the minimum relevance score for vector-based searching
 rag_min_score_keyword_search: 0             # Specifies the minimum relevance score for keyword-based searching
-rag_min_score_rerank: 0                     # Specifies the minimum relevance score for reranking
 # Defines the query structure using variables like __CONTEXT__ and __INPUT__ to tailor searches to specific needs
 rag_template: |
   Use the following context as your learned knowledge, inside <context></context> XML tags.
@@ -75,16 +57,26 @@ rag_template: |
 
   Given the context information, answer the query.
   Query: __INPUT__
+# Define document loaders to control how RAG and `.file`/`--file` load files of specific formats.
+document_loaders:
+  # You can add custom loaders using the following syntax:
+  #   <file-extension>: <command-to-load-the-file>
+  # Note: Use `$1` for input file and `$2` for output file. If `$2` is omitted, use stdout as output.
+  pdf: 'pdftotext $1 -'                         # Load .pdf file, see https://poppler.freedesktop.org to set up pdftotext
+  docx: 'pandoc --to plain $1'                  # Load .docx file, see https://pandoc.org to set up pandoc
 
 # ---- apperence ----
 highlight: true                  # Controls syntax highlighting
 light_theme: false               # Activates a light color theme when true. env: AICHAT_LIGHT_THEME
 repl_spinner: true               # set to false to disable the spinner animation
-# Custom REPL prompt, see https://github.com/sigoden/aichat/wiki/Custom-REPL-Prompt for more details
+# Custom REPL left/right prompts, see https://github.com/sigoden/aichat/wiki/Custom-REPL-Prompt for more details
 left_prompt:
   '{color.green}{?session {?agent {agent}>}{session}{?role /}}{!session {?agent {agent}>}}{role}{?rag @{rag}}{color.cyan}{?session )}{!session >}{color.reset} '
 right_prompt:
   '{color.purple}{?session {?consume_tokens {consume_tokens}({consume_percent}%)}{!consume_tokens {consume_tokens}}}{color.reset}'
+
+# ---- misc ----
+serve_addr: 127.0.0.1:8000                  # Default serve listening address 
 
 # ---- clients ----
 clients:
@@ -98,215 +90,235 @@ clients:
   #       supports_function_calling: true
   #     - name: xxxx                                  # Embedding model
   #       type: embedding
-  #       max_input_tokens: 2048
-  #       default_chunk_size: 2000                        
+  #       max_input_tokens: 200000
+  #       max_tokens_per_chunk: 2000
+  #       default_chunk_size: 1500                        
   #       max_batch_size: 100
   #     - name: xxxx                                  # Reranker model
   #       type: reranker 
   #       max_input_tokens: 2048
-  #   patches: 
-  #     <regex>:                                      # The regex to match model names, e.g. '.*' 'gpt-4o' 'gpt-4o|gpt-4-.*'
-  #       chat_completions_body:                      # The JSON to be merged with the chat completions request body.
+  #   patch:                                          # Patch api
+  #     chat_completions:                             # Api type, possible values: chat_completions, embeddings, and rerank
+  #       <regex>:                                    # The regex to match model names, e.g. '.*' 'gpt-4o' 'gpt-4o|gpt-4-.*'
+  #         url: ''                                   # Patch request url
+  #         body:                                     # Patch request body
+  #           <json>
+  #         headers:                                  # Patch request headers
+  #           <key>: <value>
   #   extra:
-  #     proxy: socks5://127.0.0.1:1080                # Set https/socks5 proxy. ENV: HTTPS_PROXY/https_proxy/ALL_PROXY/all_proxy
+  #     proxy: socks5://127.0.0.1:1080                # Set proxy
   #     connect_timeout: 10                           # Set timeout in seconds for connect to api
 
   # See https://platform.openai.com/docs/quickstart
   - type: openai
-    api_key: sk-xxx                                   # ENV: {client}_API_KEY
-    api_base: https://api.openai.com/v1               # ENV: {client}_API_BASE
+    api_base: https://api.openai.com/v1               # Optional
+    api_key: xxx
     organization_id: org-xxx                          # Optional
 
   # For any platform compatible with OpenAI's API
   - type: openai-compatible
     name: local
-    api_base: http://localhost:8080/v1                # ENV: {client}_API_BASE
-    api_key: xxx                                      # ENV: {client}_API_KEY
-    chat_endpoint: /chat/completions                  # Optional
+    api_base: http://localhost:8080/v1
+    api_key: xxx                                      # Optional
     models:
-      - name: llama3
-        max_input_tokens: 8192
+      - name: llama3.1
+        max_input_tokens: 128000
+        supports_function_calling: true
+      - name: jina-embeddings-v2-base-en
+        type: embedding
+        default_chunk_size: 1500
+        max_batch_size: 100
+      - name: jina-reranker-v2-base-multilingual
+        type: reranker
 
   # See https://ai.google.dev/docs
   - type: gemini
-    api_key: xxx                                      # ENV: {client}_API_KEY
-    patches:
-      '.*':                                           
-        chat_completions_body:
-          safetySettings:
-            - category: HARM_CATEGORY_HARASSMENT
-              threshold: BLOCK_NONE
-            - category: HARM_CATEGORY_HATE_SPEECH
-              threshold: BLOCK_NONE
-            - category: HARM_CATEGORY_SEXUALLY_EXPLICIT
-              threshold: BLOCK_NONE
-            - category: HARM_CATEGORY_DANGEROUS_CONTENT
-              threshold: BLOCK_NONE
+    api_base: https://generativelanguage.googleapis.com/v1beta
+    api_key: xxx
+    patch:
+      chat_completions:
+        '.*':
+          body:
+            safetySettings:
+              - category: HARM_CATEGORY_HARASSMENT
+                threshold: BLOCK_NONE
+              - category: HARM_CATEGORY_HATE_SPEECH
+                threshold: BLOCK_NONE
+              - category: HARM_CATEGORY_SEXUALLY_EXPLICIT
+                threshold: BLOCK_NONE
+              - category: HARM_CATEGORY_DANGEROUS_CONTENT
+                threshold: BLOCK_NONE
 
   # See https://docs.anthropic.com/claude/reference/getting-started-with-the-api
   - type: claude
-    api_key: sk-ant-xxx                               # ENV: {client}_API_KEY
+    api_base: https://api.anthropic.com/v1            # Optional
+    api_key: xxx
 
   # See https://docs.mistral.ai/
   - type: openai-compatible
     name: mistral
     api_base: https://api.mistral.ai/v1
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_key: xxx
+
+  # See https://docs.ai21.com/docs/quickstart
+  - type: openai-compatible
+    name: ai12
+    api_base: https://api.ai21.com/studio/v1
+    api_key: xxx
 
   # See https://docs.cohere.com/docs/the-cohere-platform
   - type: cohere
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_base: https://api.cohere.ai/v1                # Optional
+    api_key: xxx
 
   # See https://docs.perplexity.ai/docs/getting-started
   - type: openai-compatible
     name: perplexity
     api_base: https://api.perplexity.ai
-    api_key: pplx-xxx                                 # ENV: {client}_API_KEY
+    api_key: xxx
 
   # See https://console.groq.com/docs/quickstart
   - type: openai-compatible
     name: groq
     api_base: https://api.groq.com/openai/v1
-    api_key: gsk_xxx                                  # ENV: {client}_API_KEY
+    api_key: xxx
 
   # See https://github.com/jmorganca/ollama
-  - type: ollama
-    api_base: http://localhost:11434                  # ENV: {client}_API_BASE
-    api_auth: Basic xxx                               # ENV: {client}_API_AUTH
-    models:                                           # Required
-      - name: llama3
-        max_input_tokens: 8192
-      - name: all-minilm:l6-v2
-        type: embedding
-        max_chunk_size: 1000
+  - type: openai-compatible
+    name: ollama
+    api_base: http://localhost:11434/v1
 
   # See https://learn.microsoft.com/en-us/azure/ai-services/openai/chatgpt-quickstart
   - type: azure-openai
-    api_base: https://{RESOURCE}.openai.azure.com     # ENV: {client}_API_BASE
-    api_key: xxx                                      # ENV: {client}_API_KEY
-    models:                                           # Required
-      - name: gpt-35-turbo                            # Model deployment name
-        max_input_tokens: 8192
+    api_base: https://{RESOURCE}.openai.azure.com
+    api_key: xxx
+    models:
+      - name: gpt-4o                                  # Model deployment name
+        max_input_tokens: 128000
+        supports_vision: true
+        supports_function_calling: true
 
   # See https://cloud.google.com/vertex-ai
   - type: vertexai
-    project_id: xxx                                   # ENV: {client}_PROJECT_ID
-    location: xxx                                     # ENV: {client}_LOCATION
+    project_id: xxx
+    location: xxx
     # Specifies a application-default-credentials (adc) file, Optional field
     # Run `gcloud auth application-default login` to init the adc file
     # see https://cloud.google.com/docs/authentication/external/set-up-adc
     adc_file: <path-to/gcloud/application_default_credentials.json> 
-    patches:
-      'gemini-.*':
-        chat_completions_body:
-          safetySettings:
-            - category: HARM_CATEGORY_HARASSMENT
-              threshold: BLOCK_ONLY_HIGH
-            - category: HARM_CATEGORY_HATE_SPEECH
-              threshold: BLOCK_ONLY_HIGH
-            - category: HARM_CATEGORY_SEXUALLY_EXPLICIT
-              threshold: BLOCK_ONLY_HIGH
-            - category: HARM_CATEGORY_DANGEROUS_CONTENT
-              threshold: BLOCK_ONLY_HIGH
-
-  # See https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/use-claude
-  - type: vertexai-claude
-    project_id: xxx                                   # ENV: {client}_PROJECT_ID
-    location: xxx                                     # ENV: {client}_LOCATION
-    # Specifies a application-default-credentials (adc) file, Optional field
-    # Run `gcloud auth application-default login` to init the adc file
-    # see https://cloud.google.com/docs/authentication/external/set-up-adc
-    adc_file: <path-to/gcloud/application_default_credentials.json> 
+    patch:
+      chat_completions:
+        'gemini-.*':
+          body:
+            safetySettings:
+              - category: HARM_CATEGORY_HARASSMENT
+                threshold: BLOCK_ONLY_HIGH
+              - category: HARM_CATEGORY_HATE_SPEECH
+                threshold: BLOCK_ONLY_HIGH
+              - category: HARM_CATEGORY_SEXUALLY_EXPLICIT
+                threshold: BLOCK_ONLY_HIGH
+              - category: HARM_CATEGORY_DANGEROUS_CONTENT
+                threshold: BLOCK_ONLY_HIGH
 
   # See https://docs.aws.amazon.com/bedrock/latest/userguide/
   - type: bedrock
-    access_key_id: xxx                                # ENV: {client}_ACCESS_KEY_ID
-    secret_access_key: xxx                            # ENV: {client}_SECRET_ACCESS_KEY
-    region: xxx                                       # ENV: {client}_REGION
+    access_key_id: xxx
+    secret_access_key: xxx
+    region: xxx
 
   # See https://developers.cloudflare.com/workers-ai/
-  - type: cloudflare
-    account_id: xxx                                   # ENV: {client}_ACCOUNT_ID
-    api_key: xxx                                      # ENV: {client}_API_KEY
+  - type: openai-compatible
+    name: cloudflare
+    api_base: https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1
+    api_key: xxx
 
-  # See https://replicate.com/docs
-  - type: replicate
-    api_key: xxx                                      # ENV: {client}_API_KEY
+  # See https://huggingface.co/inference-api/serverless
+  - type: openai-compatible
+    name: huggingface
+    api_base: https://api-inference.huggingface.co/v1
+    api_key: xxx
 
   # See https://cloud.baidu.com/doc/WENXINWORKSHOP/index.html
   - type: ernie
-    api_key: xxx                                      # ENV: {client}_API_KEY
-    secret_key: xxxx                                  # ENV: {client}_SECRET_KEY
+    api_key: xxx
+    secret_key: xxx
 
   # See https://help.aliyun.com/zh/dashscope/
-  - type: qianwen
-    api_key: sk-xxx                                   # ENV: {client}_API_KEY
+  - type: openai-compatible
+    name: qianwen
+    api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: xxx
 
   # See https://platform.moonshot.cn/docs/intro
   - type: openai-compatible
     name: moonshot
     api_base: https://api.moonshot.cn/v1
-    api_key: sk-xxx                                   # ENV: {client}_API_KEY
+    api_key: xxx
 
   # See https://platform.deepseek.com/api-docs/
   - type: openai-compatible
     name: deepseek
-    api_key: sk-xxx                                   # ENV: {client}_API_KEY
+    api_base: https://api.deepseek.com
+    api_key: xxx
 
   # See https://open.bigmodel.cn/dev/howuse/introduction
   - type: openai-compatible
     name: zhipuai
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_base: https://open.bigmodel.cn/api/paas/v4
+    api_key: xxx
 
   # See https://platform.lingyiwanwu.com/docs
   - type: openai-compatible
     name: lingyiwanwu
-    api_key: xxx                                      # ENV: {client}_API_KEY
-
-  # See https://docs.endpoints.anyscale.com/
-  - type: openai-compatible
-    name: anyscale
-    api_base: https://api.endpoints.anyscale.com/v1
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_base: https://api.lingyiwanwu.com/v1
+    api_key: xxx
 
   # See https://deepinfra.com/docs
   - type: openai-compatible
     name: deepinfra
     api_base: https://api.deepinfra.com/v1/openai
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_key: xxx
+
+  # See https://github.com/marketplace/models
+  - type: openai-compatible
+    name: github
+    api_base: https://models.inference.ai.azure.com
+    api_key: xxx
 
   # See https://readme.fireworks.ai/docs/quickstart
   - type: openai-compatible
     name: fireworks
     api_base: https://api.fireworks.ai/inference/v1
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_key: xxx
 
   # See https://openrouter.ai/docs#quick-start
   - type: openai-compatible
     name: openrouter
     api_base: https://openrouter.ai/api/v1
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_key: xxx
 
-  # See https://octo.ai/docs/getting-started/quickstart
+  # See https://docs.siliconflow.cn/docs/getting-started
   - type: openai-compatible
-    name: octoai
-    api_base: https://text.octoai.run/v1
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    name: siliconflow
+    api_base: https://api.siliconflow.cn/v1
+    api_key: xxx
 
   # See https://docs.together.ai/docs/quickstart
   - type: openai-compatible
     name: together
     api_base: https://api.together.xyz/v1
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_key: xxx
+
+  # ----- RAG dedicated -----
 
   # See https://jina.ai
-  - type: rag-dedicated
+  - type: openai-compatible
     name: jina
     api_base: https://api.jina.ai/v1
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_key: xxx
 
   # See https://docs.voyageai.com/docs/introduction
-  - type: rag-dedicated
+  - type: openai-compatible
     name: voyageai
-    api_base: https://api.voyageai.ai/v1
-    api_key: xxx                                      # ENV: {client}_API_KEY
+    api_base: https://api.voyageai.com/v1
+    api_key: xxx

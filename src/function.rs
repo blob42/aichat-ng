@@ -4,9 +4,7 @@ use crate::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use fancy_regex::Regex;
-use indexmap::{IndexMap, IndexSet};
-use inquire::{validator::Validation, Text};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -15,9 +13,7 @@ use std::{
     path::Path,
 };
 
-pub const SELECTED_ALL_FUNCTIONS: &str = ".*";
 pub type ToolResults = (Vec<ToolResult>, String);
-pub type FunctionsFilter = String;
 
 pub fn eval_tool_calls(config: &GlobalConfig, mut calls: Vec<ToolCall>) -> Result<Vec<ToolResult>> {
     let mut output = vec![];
@@ -53,7 +49,6 @@ impl ToolResult {
 
 #[derive(Debug, Clone, Default)]
 pub struct Functions {
-    names: IndexSet<String>,
     declarations: Vec<FunctionDeclaration>,
 }
 
@@ -62,7 +57,7 @@ impl Functions {
         let declarations: Vec<FunctionDeclaration> = if declarations_path.exists() {
             let ctx = || {
                 format!(
-                    "Failed to load function declarations at {}",
+                    "Failed to load functions at {}",
                     declarations_path.display()
                 )
             };
@@ -72,35 +67,23 @@ impl Functions {
             vec![]
         };
 
-        let names = declarations.iter().map(|v| v.name.clone()).collect();
-
-        Ok(Self {
-            names,
-            declarations,
-        })
+        Ok(Self { declarations })
     }
 
-    pub fn select(&self, filter: &FunctionsFilter) -> Option<Vec<FunctionDeclaration>> {
-        let regex = Regex::new(&format!("^({filter})$")).ok()?;
-        let output: Vec<FunctionDeclaration> = self
-            .declarations
-            .iter()
-            .filter(|v| regex.is_match(&v.name).unwrap_or_default())
-            .cloned()
-            .collect();
-        if output.is_empty() {
-            None
-        } else {
-            Some(output)
-        }
+    pub fn find(&self, name: &str) -> Option<&FunctionDeclaration> {
+        self.declarations.iter().find(|v| v.name == name)
     }
 
     pub fn contains(&self, name: &str) -> bool {
-        self.names.contains(name)
+        self.declarations.iter().any(|v| v.name == name)
+    }
+
+    pub fn declarations(&self) -> &[FunctionDeclaration] {
+        &self.declarations
     }
 
     pub fn is_empty(&self) -> bool {
-        self.names.is_empty()
+        self.declarations.is_empty()
     }
 }
 
@@ -109,6 +92,8 @@ pub struct FunctionDeclaration {
     pub name: String,
     pub description: String,
     pub parameters: JsonSchema,
+    #[serde(skip_serializing, default)]
+    pub agent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,28 +156,46 @@ impl ToolCall {
 
     pub fn eval(&self, config: &GlobalConfig) -> Result<Value> {
         let function_name = self.name.clone();
-        let is_dangerously = config.read().is_dangerously_function(&function_name);
-        let (call_name, cmd_name, mut cmd_args) = match &config.read().agent {
-            Some(agent) => {
-                if !agent.functions().contains(&function_name) {
-                    bail!(
-                        "Unexpected call: {} {function_name} {}",
-                        agent.name(),
-                        self.arguments
-                    );
+        let (call_name, cmd_name, mut cmd_args, mut envs) = match &config.read().agent {
+            Some(agent) => match agent.functions().find(&function_name) {
+                Some(function) => {
+                    if function.agent {
+                        let envs: HashMap<String, String> = agent
+                            .variables()
+                            .iter()
+                            .map(|v| {
+                                (
+                                    format!("LLM_AGENT_VAR_{}", normalize_env_name(&v.name)),
+                                    v.value.clone(),
+                                )
+                            })
+                            .collect();
+                        (
+                            format!("{}:{}", agent.name(), function_name),
+                            agent.name().to_string(),
+                            vec![function_name],
+                            envs,
+                        )
+                    } else {
+                        (
+                            function_name.clone(),
+                            function_name,
+                            vec![],
+                            Default::default(),
+                        )
+                    }
                 }
-                (
-                    format!("{}:{}", agent.name(), function_name),
-                    agent.name().to_string(),
-                    vec![function_name],
-                )
-            }
-            None => {
-                if !config.read().functions.contains(&function_name) {
-                    bail!("Unexpected call: {function_name} {}", self.arguments);
-                }
-                (function_name.clone(), function_name, vec![])
-            }
+                None => bail!("Unexpected call {function_name} {}", self.arguments),
+            },
+            None => match config.read().functions.contains(&function_name) {
+                true => (
+                    function_name.clone(),
+                    function_name,
+                    vec![],
+                    Default::default(),
+                ),
+                false => bail!("Unexpected call: {function_name} {}", self.arguments),
+            },
         };
         let json_data = if self.arguments.is_object() {
             self.arguments.clone()
@@ -211,81 +214,33 @@ impl ToolCall {
         cmd_args.push(json_data.to_string());
         let prompt = format!("Call {cmd_name} {}", cmd_args.join(" "));
 
-        let mut envs = HashMap::new();
         let bin_dir = Config::functions_bin_dir()?;
         if bin_dir.exists() {
             envs.insert("PATH".into(), prepend_env_path(&bin_dir)?);
         }
+        let temp_file = temp_file("-eval-", "");
+        envs.insert("LLM_OUTPUT".into(), temp_file.display().to_string());
 
         #[cfg(windows)]
         let cmd_name = polyfill_cmd_name(&cmd_name, &bin_dir);
-
-        let output = if is_dangerously {
-            if *IS_STDOUT_TERMINAL {
-                println!("{prompt}");
-                let answer = Text::new("[1] Run, [2] Run & Retrieve, [3] Skip:")
-                    .with_default("2")
-                    .with_validator(|input: &str| match matches!(input, "1" | "2" | "3") {
-                        true => Ok(Validation::Valid),
-                        false => Ok(Validation::Invalid(
-                            "Invalid input, please select 1, 2 or 3".into(),
-                        )),
-                    })
-                    .prompt()?;
-                match answer.as_str() {
-                    "1" => {
-                        let exit_code = run_command(&cmd_name, &cmd_args, Some(envs))?;
-                        if exit_code != 0 {
-                            bail!("Exit {exit_code}");
-                        }
-                        Value::Null
-                    }
-                    "2" => run_and_retrieve(&cmd_name, &cmd_args, envs)?,
-                    _ => Value::Null,
-                }
-            } else {
-                println!("Skipped {prompt}");
-                Value::Null
-            }
-        } else {
-            println!("{}", dimmed_text(&prompt));
-            run_and_retrieve(&cmd_name, &cmd_args, envs)?
-        };
-
-        Ok(output)
-    }
-}
-
-fn run_and_retrieve(
-    cmd_name: &str,
-    cmd_args: &[String],
-    envs: HashMap<String, String>,
-) -> Result<Value> {
-    let (success, stdout, stderr) = run_command_with_output(cmd_name, cmd_args, Some(envs))?;
-
-    if success {
-        if !stderr.is_empty() {
-            eprintln!("{}", warning_text(&stderr));
+        println!("{}", dimmed_text(&prompt));
+        let exit_code = run_command(&cmd_name, &cmd_args, Some(envs))
+            .map_err(|err| anyhow!("Unable to run {cmd_name}, {err}"))?;
+        if exit_code != 0 {
+            bail!("Tool call exit with {exit_code}");
         }
-        let value = if !stdout.is_empty() {
-            serde_json::from_str(&stdout)
+        let output = if temp_file.exists() {
+            let contents =
+                fs::read_to_string(temp_file).context("Failed to retrieve tool call output")?;
+
+            serde_json::from_str(&contents)
                 .ok()
-                .unwrap_or_else(|| json!({"output": stdout}))
+                .unwrap_or_else(|| json!({"result": contents}))
         } else {
             Value::Null
         };
-        Ok(value)
-    } else {
-        let err = if stderr.is_empty() {
-            if stdout.is_empty() {
-                "Something wrong"
-            } else {
-                &stdout
-            }
-        } else {
-            &stderr
-        };
-        bail!("{err}");
+
+        Ok(output)
     }
 }
 

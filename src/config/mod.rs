@@ -3,7 +3,7 @@ mod input;
 mod role;
 mod session;
 
-pub use self::agent::{list_agents, Agent, AgentConfig};
+pub use self::agent::{list_agents, Agent};
 pub use self::input::Input;
 pub use self::role::{Role, RoleLike, CODE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE};
 use self::session::Session;
@@ -12,22 +12,25 @@ use crate::client::{
     create_client_config, list_chat_models, list_client_types, list_reranker_models, ClientConfig,
     Model, OPENAI_COMPATIBLE_PLATFORMS,
 };
-use crate::function::{FunctionDeclaration, Functions, FunctionsFilter, ToolResult};
+use crate::function::{FunctionDeclaration, Functions, ToolResult};
 use crate::rag::Rag;
 use crate::render::{MarkdownRender, RenderOptions};
 use crate::utils::*;
 
 use anyhow::{anyhow, bail, Context, Result};
-use fancy_regex::Regex;
+use indexmap::IndexMap;
 use input::Regenerate;
-use inquire::{Confirm, Select};
+use inquire::{list_option::ListOption, validator::Validation, Confirm, MultiSelect, Select, Text};
 use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::json;
+use simplelog::LevelFilter;
 use std::collections::{HashMap, HashSet};
 use std::{
     env,
-    fs::{create_dir_all, read_dir, read_to_string, remove_file, File, OpenOptions},
+    fs::{
+        create_dir_all, read_dir, read_to_string, remove_dir_all, remove_file, File, OpenOptions,
+    },
     io::Write,
     path::{Path, PathBuf},
     process,
@@ -40,7 +43,8 @@ const DARK_THEME: &[u8] = include_bytes!("../../assets/monokai-extended.theme.bi
 const LIGHT_THEME: &[u8] = include_bytes!("../../assets/monokai-extended-light.theme.bin");
 
 const CONFIG_FILE_NAME: &str = "config.yaml";
-const ROLES_FILE_NAME: &str = "roles.yaml";
+const ROLES_DIR_NAME: &str = "roles";
+const ENV_FILE_NAME: &str = ".env";
 const MESSAGES_FILE_NAME: &str = "messages.md";
 const SESSIONS_DIR_NAME: &str = "sessions";
 const RAGS_DIR_NAME: &str = "rags";
@@ -48,13 +52,15 @@ const FUNCTIONS_DIR_NAME: &str = "functions";
 const FUNCTIONS_FILE_NAME: &str = "functions.json";
 const FUNCTIONS_BIN_DIR_NAME: &str = "bin";
 const AGENTS_DIR_NAME: &str = "agents";
-const AGENT_RAG_FILE_NAME: &str = "rag.bin";
+const AGENT_VARIABLES_FILE_NAME: &str = "variables.yaml";
 
 pub const TEMP_ROLE_NAME: &str = "%%";
 pub const TEMP_RAG_NAME: &str = "temp";
 pub const TEMP_SESSION_NAME: &str = "temp";
 
 const CLIENTS_FIELD: &str = "clients";
+
+const SERVE_ADDR: &str = "127.0.0.1:8000";
 
 const SUMMARIZE_PROMPT: &str =
     "Summarize the discussion briefly in 200 words or less to use as a prompt for future context.";
@@ -87,11 +93,16 @@ pub struct Config {
     pub top_p: Option<f64>,
 
     pub dry_run: bool,
+    pub stream: bool,
     pub save: bool,
-    pub keybindings: Keybindings,
-    pub buffer_editor: Option<String>,
+    pub keybindings: String,
+    pub editor: Option<String>,
     pub wrap: Option<String>,
     pub wrap_code: bool,
+
+    pub function_calling: bool,
+    pub mapping_tools: IndexMap<String, String>,
+    pub use_tools: Option<String>,
 
     pub prelude: Option<String>,
     pub repl_prelude: Option<String>,
@@ -102,10 +113,6 @@ pub struct Config {
     pub summarize_prompt: Option<String>,
     pub summary_prompt: Option<String>,
 
-    pub function_calling: bool,
-    pub dangerously_functions_filter: Option<FunctionsFilter>,
-    pub agents: Vec<AgentConfig>,
-
     pub rag_embedding_model: Option<String>,
     pub rag_reranker_model: Option<String>,
     pub rag_top_k: usize,
@@ -113,10 +120,10 @@ pub struct Config {
     pub rag_chunk_overlap: Option<usize>,
     pub rag_min_score_vector_search: f32,
     pub rag_min_score_keyword_search: f32,
-    pub rag_min_score_rerank: f32,
+    pub rag_template: Option<String>,
+
     #[serde(default)]
     pub document_loaders: HashMap<String, String>,
-    pub rag_template: Option<String>,
 
     pub highlight: bool,
     pub light_theme: bool,
@@ -124,10 +131,10 @@ pub struct Config {
     pub left_prompt: Option<String>,
     pub right_prompt: Option<String>,
 
+    pub serve_addr: Option<String>,
+
     pub clients: Vec<ClientConfig>,
 
-    #[serde(skip)]
-    pub roles: Vec<Role>,
     #[serde(skip)]
     pub role: Option<Role>,
     #[serde(skip)]
@@ -154,19 +161,25 @@ impl Default for Config {
             top_p: None,
 
             dry_run: false,
+            stream: true,
             save: false,
-            keybindings: Default::default(),
-            buffer_editor: None,
+            keybindings: "emacs".into(),
+            editor: None,
             wrap: None,
             wrap_code: false,
+
+            function_calling: true,
+            mapping_tools: Default::default(),
+            use_tools: None,
 
             prelude: None,
             repl_prelude: None,
             agent_prelude: None,
 
-            function_calling: false,
-            dangerously_functions_filter: None,
-            agents: vec![],
+            save_session: None,
+            compress_threshold: 4000,
+            summarize_prompt: None,
+            summary_prompt: None,
 
             rag_embedding_model: None,
             rag_reranker_model: None,
@@ -175,14 +188,9 @@ impl Default for Config {
             rag_chunk_overlap: None,
             rag_min_score_vector_search: 0.0,
             rag_min_score_keyword_search: 0.0,
-            rag_min_score_rerank: 0.0,
-            document_loaders: Default::default(),
             rag_template: None,
 
-            save_session: None,
-            compress_threshold: 4000,
-            summarize_prompt: None,
-            summary_prompt: None,
+            document_loaders: Default::default(),
 
             highlight: true,
             light_theme: false,
@@ -190,9 +198,10 @@ impl Default for Config {
             left_prompt: None,
             right_prompt: None,
 
+            serve_addr: None,
+
             clients: vec![],
 
-            roles: vec![],
             role: None,
             session: None,
             rag: None,
@@ -210,42 +219,44 @@ pub type GlobalConfig = Arc<RwLock<Config>>;
 impl Config {
     pub fn init(working_mode: WorkingMode) -> Result<Self> {
         let config_path = Self::config_file()?;
-
-        let platform = env::var(get_env_name("platform")).ok();
-        if *IS_STDOUT_TERMINAL && platform.is_none() && !config_path.exists() {
-            create_config_file(&config_path)?;
-        }
-        let mut config = if platform.is_some() {
-            Self::load_config_env(&platform.unwrap())?
+        let mut config = if !config_path.exists() {
+            match env::var(get_env_name("platform")) {
+                Ok(v) => Self::load_dynamic(&v)?,
+                Err(_) => {
+                    if *IS_STDOUT_TERMINAL {
+                        create_config_file(&config_path)?;
+                    }
+                    Self::load_from_file(&config_path)?
+                }
+            }
         } else {
-            Self::load_config_file(&config_path)?
+            Self::load_from_file(&config_path)?
         };
+
+        config.working_mode = working_mode;
+
+        config.load_envs();
 
         if let Some(wrap) = config.wrap.clone() {
             config.set_wrap(&wrap)?;
         }
 
-        config.functions = Functions::init(&Self::functions_file()?)?;
-
-        config.working_mode = working_mode;
-        config.load_roles()?;
+        config.load_functions()?;
 
         config.setup_model()?;
-        config.setup_highlight();
-        config.setup_light_theme()?;
         config.setup_document_loaders();
 
         Ok(config)
     }
 
     pub fn config_dir() -> Result<PathBuf> {
-        let env_name = get_env_name("config_dir");
-        let path = if let Some(v) = env::var_os(env_name) {
+        let path = if let Ok(v) = env::var(get_env_name("config_dir")) {
             PathBuf::from(v)
+        } else if let Ok(v) = env::var("XDG_CONFIG_HOME") {
+            PathBuf::from(v).join(env!("CARGO_CRATE_NAME"))
         } else {
-            let mut dir = dirs::config_dir().ok_or_else(|| anyhow!("Not found config dir"))?;
-            dir.push(env!("CARGO_CRATE_NAME"));
-            dir
+            let dir = dirs::config_dir().ok_or_else(|| anyhow!("Not available config dir"))?;
+            dir.join(env!("CARGO_CRATE_NAME"))
         };
         Ok(path)
     }
@@ -263,10 +274,21 @@ impl Config {
         }
     }
 
-    pub fn roles_file() -> Result<PathBuf> {
-        match env::var(get_env_name("roles_file")) {
+    pub fn roles_dir() -> Result<PathBuf> {
+        match env::var(get_env_name("roles_dir")) {
             Ok(value) => Ok(PathBuf::from(value)),
-            Err(_) => Self::local_path(ROLES_FILE_NAME),
+            Err(_) => Self::local_path(ROLES_DIR_NAME),
+        }
+    }
+
+    pub fn role_file(name: &str) -> Result<PathBuf> {
+        Ok(Self::roles_dir()?.join(format!("{name}.md")))
+    }
+
+    pub fn env_file() -> Result<PathBuf> {
+        match env::var(get_env_name("env_file")) {
+            Ok(value) => Ok(PathBuf::from(value)),
+            Err(_) => Self::local_path(ENV_FILE_NAME),
         }
     }
 
@@ -317,40 +339,45 @@ impl Config {
     }
 
     pub fn rag_file(&self, name: &str) -> Result<PathBuf> {
-        let path = if self.agent.is_none() {
-            Self::rags_dir()?.join(format!("{name}.bin"))
-        } else {
-            Self::rags_dir()?
-                .join(AGENTS_DIR_NAME)
-                .join(format!("{name}.bin"))
+        let path = match &self.agent {
+            Some(agent) => Self::agent_rag_file(agent.name(), name)?,
+            None => Self::rags_dir()?.join(format!("{name}.yaml")),
         };
         Ok(path)
     }
 
     pub fn agents_config_dir() -> Result<PathBuf> {
-        match env::var(get_env_name("agents_config_dir")) {
-            Ok(value) => Ok(PathBuf::from(value)),
-            Err(_) => Self::local_path(AGENTS_DIR_NAME),
-        }
+        Self::local_path(AGENTS_DIR_NAME)
     }
 
     pub fn agent_config_dir(name: &str) -> Result<PathBuf> {
-        Ok(Self::agents_config_dir()?.join(name))
-    }
-
-    pub fn agent_rag_file(name: &str) -> Result<PathBuf> {
-        Ok(Self::agent_config_dir(name)?.join(AGENT_RAG_FILE_NAME))
-    }
-
-    pub fn agents_functions_dir() -> Result<PathBuf> {
-        match env::var(get_env_name("agents_functions_dir")) {
+        match env::var(format!("{}_CONFIG_DIR", normalize_env_name(name))) {
             Ok(value) => Ok(PathBuf::from(value)),
-            Err(_) => Ok(Self::functions_dir()?.join(AGENTS_DIR_NAME)),
+            Err(_) => Ok(Self::agents_config_dir()?.join(name)),
         }
     }
 
+    pub fn agent_config_file(name: &str) -> Result<PathBuf> {
+        Ok(Self::agent_config_dir(name)?.join(CONFIG_FILE_NAME))
+    }
+
+    pub fn agent_rag_file(agent_name: &str, rag_name: &str) -> Result<PathBuf> {
+        Ok(Self::agent_config_dir(agent_name)?.join(format!("{rag_name}.yaml")))
+    }
+
+    pub fn agent_variables_file(name: &str) -> Result<PathBuf> {
+        Ok(Self::agent_config_dir(name)?.join(AGENT_VARIABLES_FILE_NAME))
+    }
+
+    pub fn agents_functions_dir() -> Result<PathBuf> {
+        Ok(Self::functions_dir()?.join(AGENTS_DIR_NAME))
+    }
+
     pub fn agent_functions_dir(name: &str) -> Result<PathBuf> {
-        Ok(Self::agents_functions_dir()?.join(name))
+        match env::var(format!("{}_FUNCTIONS_DIR", normalize_env_name(name))) {
+            Ok(value) => Ok(PathBuf::from(value)),
+            Err(_) => Ok(Self::agents_functions_dir()?.join(name)),
+        }
     }
 
     pub fn state(&self) -> StateFlags {
@@ -372,6 +399,40 @@ impl Config {
             flags |= StateFlags::RAG;
         }
         flags
+    }
+
+    pub fn serve_addr(&self) -> String {
+        self.serve_addr.clone().unwrap_or_else(|| SERVE_ADDR.into())
+    }
+
+    pub fn log_config(is_serve: bool) -> Result<(LevelFilter, Option<PathBuf>)> {
+        let log_level = env::var(get_env_name("log_level"))
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(match cfg!(debug_assertions) {
+                true => LevelFilter::Debug,
+                false => {
+                    if is_serve {
+                        LevelFilter::Info
+                    } else {
+                        LevelFilter::Off
+                    }
+                }
+            });
+        if log_level == LevelFilter::Off {
+            return Ok((log_level, None));
+        }
+        let log_path = match env::var(get_env_name("log_path")) {
+            Ok(v) => Some(PathBuf::from(v)),
+            Err(_) => match is_serve {
+                true => None,
+                false => Some(Config::local_path(&format!(
+                    "{}.log",
+                    env!("CARGO_CRATE_NAME")
+                ))?),
+            },
+        };
+        Ok((log_level, log_path))
     }
 
     pub fn current_model(&self) -> &Model {
@@ -407,7 +468,12 @@ impl Config {
             role.clone()
         } else {
             let mut role = Role::default();
-            role.batch_set(&self.model, self.temperature, self.top_p, None);
+            role.batch_set(
+                &self.model,
+                self.temperature,
+                self.top_p,
+                self.use_tools.clone(),
+            );
             role
         };
         if role.temperature().is_none() && self.temperature.is_some() {
@@ -436,7 +502,7 @@ impl Config {
         } else if let Some(session) = &self.session {
             session.export()
         } else if let Some(role) = &self.role {
-            role.export()
+            Ok(role.export())
         } else if let Some(rag) = &self.rag {
             rag.export()
         } else {
@@ -450,8 +516,16 @@ impl Config {
             .wrap
             .clone()
             .map_or_else(|| String::from("no"), |v| v.to_string());
+        let (rag_reranker_model, rag_top_k) = match &self.rag {
+            Some(rag) => rag.get_config(),
+            None => (self.rag_reranker_model.clone(), self.rag_top_k),
+        };
+        let agent_prelude = match &self.agent {
+            Some(agent) => agent.agent_prelude(),
+            None => self.agent_prelude.as_deref(),
+        };
         let role = self.extract_role();
-        let items = vec![
+        let mut items = vec![
             ("model", role.model().id()),
             (
                 "max_output_tokens",
@@ -463,44 +537,43 @@ impl Config {
             ("temperature", format_option_value(&role.temperature())),
             ("top_p", format_option_value(&role.top_p())),
             ("dry_run", self.dry_run.to_string()),
+            ("stream", self.stream.to_string()),
             ("save", self.save.to_string()),
-            ("keybindings", self.keybindings.stringify().into()),
+            ("keybindings", self.keybindings.clone()),
             ("wrap", wrap),
             ("wrap_code", self.wrap_code.to_string()),
+            ("function_calling", self.function_calling.to_string()),
+            ("use_tools", format_option_value(&role.use_tools())),
+            ("agent_prelude", format_option_value(&agent_prelude)),
             ("save_session", format_option_value(&self.save_session)),
             ("compress_threshold", self.compress_threshold.to_string()),
-            ("function_calling", self.function_calling.to_string()),
             (
                 "rag_reranker_model",
-                format_option_value(&self.rag_reranker_model),
+                format_option_value(&rag_reranker_model),
             ),
-            ("rag_top_k", self.rag_top_k.to_string()),
+            ("rag_top_k", rag_top_k.to_string()),
             ("highlight", self.highlight.to_string()),
             ("light_theme", self.light_theme.to_string()),
+            ("env_file", display_path(&Self::env_file()?)),
             ("config_file", display_path(&Self::config_file()?)),
-            ("roles_file", display_path(&Self::roles_file()?)),
-            ("functions_dir", display_path(&Self::functions_dir()?)),
-            (
-                "agents_functions_dir",
-                display_path(&Self::agents_functions_dir()?),
-            ),
-            (
-                "agents_config_dir",
-                display_path(&Self::agents_config_dir()?),
-            ),
-            ("rags_dir", display_path(&Self::rags_dir()?)),
+            ("roles_dir", display_path(&Self::roles_dir()?)),
             ("sessions_dir", display_path(&self.sessions_dir()?)),
+            ("rags_dir", display_path(&Self::rags_dir()?)),
+            ("functions_dir", display_path(&Self::functions_dir()?)),
             ("messages_file", display_path(&self.messages_file()?)),
         ];
+        if let Ok((_, Some(log_path))) = Self::log_config(self.working_mode.is_serve()) {
+            items.push(("log_path", display_path(&log_path)));
+        }
         let output = items
             .iter()
-            .map(|(name, value)| format!("{name:<24}{value}"))
+            .map(|(name, value)| format!("{name:<24}{value}\n"))
             .collect::<Vec<String>>()
-            .join("\n");
+            .join("");
         Ok(output)
     }
 
-    pub fn update(&mut self, data: &str) -> Result<()> {
+    pub fn update(config: &GlobalConfig, data: &str) -> Result<()> {
         let parts: Vec<&str> = data.split_whitespace().collect();
         if parts.len() != 2 {
             bail!("Usage: .set <key> <value>. If value is null, unset key.");
@@ -510,54 +583,133 @@ impl Config {
         match key {
             "max_output_tokens" => {
                 let value = parse_value(value)?;
-                self.set_max_output_tokens(value);
+                config.write().set_max_output_tokens(value);
             }
             "temperature" => {
                 let value = parse_value(value)?;
-                self.set_temperature(value);
+                config.write().set_temperature(value);
             }
             "top_p" => {
                 let value = parse_value(value)?;
-                self.set_top_p(value);
-            }
-            "rag_reranker_model" => {
-                self.rag_reranker_model = if value == "null" {
-                    None
-                } else {
-                    Some(value.to_string())
-                }
-            }
-            "rag_top_k" => {
-                if let Some(value) = parse_value(value)? {
-                    self.rag_top_k = value;
-                }
-            }
-            "function_calling" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.function_calling = value;
-            }
-            "compress_threshold" => {
-                let value = parse_value(value)?;
-                self.set_compress_threshold(value);
-            }
-            "save" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.save = value;
-            }
-            "save_session" => {
-                let value = parse_value(value)?;
-                self.set_save_session(value);
-            }
-            "highlight" => {
-                let value = value.parse().with_context(|| "Invalid value")?;
-                self.highlight = value;
+                config.write().set_top_p(value);
             }
             "dry_run" => {
                 let value = value.parse().with_context(|| "Invalid value")?;
-                self.dry_run = value;
+                config.write().dry_run = value;
             }
-            _ => bail!("Unknown key `{key}`"),
+            "stream" => {
+                let value = value.parse().with_context(|| "Invalid value")?;
+                config.write().stream = value;
+            }
+            "save" => {
+                let value = value.parse().with_context(|| "Invalid value")?;
+                config.write().save = value;
+            }
+            "function_calling" => {
+                let value = value.parse().with_context(|| "Invalid value")?;
+                if value && config.write().functions.is_empty() {
+                    bail!("Function calling cannot be enabled because no functions are installed.")
+                }
+                config.write().function_calling = value;
+            }
+            "use_tools" => {
+                let value = parse_value(value)?;
+                config.write().set_use_tools(value);
+            }
+            "agent_prelude" => {
+                let value = parse_value(value)?;
+                config.write().set_agent_prelude(value);
+            }
+            "save_session" => {
+                let value = parse_value(value)?;
+                config.write().set_save_session(value);
+            }
+            "compress_threshold" => {
+                let value = parse_value(value)?;
+                config.write().set_compress_threshold(value);
+            }
+            "rag_reranker_model" => {
+                let value = parse_value(value)?;
+                Self::set_rag_reranker_model(config, value)?;
+            }
+            "rag_top_k" => {
+                let value = value.parse().with_context(|| "Invalid value")?;
+                Self::set_rag_top_k(config, value)?;
+            }
+            "highlight" => {
+                let value = value.parse().with_context(|| "Invalid value")?;
+                config.write().highlight = value;
+            }
+            _ => bail!("Unknown key '{key}'"),
         }
+        Ok(())
+    }
+
+    pub fn delete(config: &GlobalConfig, kind: &str) -> Result<()> {
+        let (dir, file_ext) = match kind {
+            "roles" => (Self::roles_dir()?, Some(".md")),
+            "sessions" => (config.read().sessions_dir()?, Some(".yaml")),
+            "rags" => (Self::rags_dir()?, Some(".yaml")),
+            "agents" => (Self::agents_config_dir()?, None),
+            _ => bail!("Unknown kind '{kind}'"),
+        };
+        let names = match read_dir(&dir) {
+            Ok(rd) => {
+                let mut names = vec![];
+                for entry in rd.flatten() {
+                    let name = entry.file_name();
+                    match file_ext {
+                        Some(file_ext) => {
+                            if let Some(name) = name.to_string_lossy().strip_suffix(file_ext) {
+                                names.push(name.to_string());
+                            }
+                        }
+                        None => {
+                            if entry.path().is_dir() {
+                                names.push(name.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+                names.sort_unstable();
+                names
+            }
+            Err(_) => vec![],
+        };
+
+        if names.is_empty() {
+            bail!("No {kind} to delete")
+        }
+
+        let select_names = MultiSelect::new(&format!("Select {kind} to delete:"), names)
+            .with_validator(|list: &[ListOption<&String>]| {
+                if list.is_empty() {
+                    Ok(Validation::Invalid(
+                        "At least one item must be selected".into(),
+                    ))
+                } else {
+                    Ok(Validation::Valid)
+                }
+            })
+            .prompt()?;
+
+        for name in select_names {
+            match file_ext {
+                Some(ext) => {
+                    let path = dir.join(format!("{name}{ext}"));
+                    remove_file(&path).with_context(|| {
+                        format!("Failed to delete {kind} at '{}'", path.display())
+                    })?;
+                }
+                None => {
+                    let path = dir.join(name);
+                    remove_dir_all(&path).with_context(|| {
+                        format!("Failed to delete {kind} at '{}'", path.display())
+                    })?;
+                }
+            }
+        }
+        println!("✨ Successfully deleted {kind}");
         Ok(())
     }
 
@@ -575,6 +727,20 @@ impl Config {
         }
     }
 
+    pub fn set_use_tools(&mut self, value: Option<String>) {
+        match self.role_like_mut() {
+            Some(role_like) => role_like.set_use_tools(value),
+            None => self.use_tools = value,
+        }
+    }
+
+    pub fn set_agent_prelude(&mut self, value: Option<String>) {
+        match self.agent.as_mut() {
+            Some(agent) => agent.set_agent_prelude(value),
+            None => self.agent_prelude = value,
+        }
+    }
+
     pub fn set_save_session(&mut self, value: Option<bool>) {
         if let Some(session) = self.session.as_mut() {
             session.set_save_session(value);
@@ -589,6 +755,33 @@ impl Config {
         } else {
             self.compress_threshold = value.unwrap_or_default();
         }
+    }
+
+    pub fn set_rag_reranker_model(config: &GlobalConfig, value: Option<String>) -> Result<()> {
+        if let Some(id) = &value {
+            Model::retrieve_reranker(&config.read(), id)?;
+        }
+        let has_rag = config.read().rag.is_some();
+        match has_rag {
+            true => update_rag(config, |rag| {
+                rag.set_reranker_model(value)?;
+                Ok(())
+            })?,
+            false => config.write().rag_reranker_model = value,
+        }
+        Ok(())
+    }
+
+    pub fn set_rag_top_k(config: &GlobalConfig, value: usize) -> Result<()> {
+        let has_rag = config.read().rag.is_some();
+        match has_rag {
+            true => update_rag(config, |rag| {
+                rag.set_top_k(value)?;
+                Ok(())
+            })?,
+            false => config.write().rag_top_k = value,
+        }
+        Ok(())
     }
 
     pub fn set_wrap(&mut self, value: &str) -> Result<()> {
@@ -649,7 +842,7 @@ impl Config {
 
     pub fn role_info(&self) -> Result<String> {
         if let Some(role) = &self.role {
-            role.export()
+            Ok(role.export())
         } else {
             bail!("No role")
         }
@@ -666,27 +859,135 @@ impl Config {
     }
 
     pub fn retrieve_role(&self, name: &str) -> Result<Role> {
-        let mut role = self
-            .roles
-            .iter()
-            .find(|v| v.match_name(name))
-            .map(|v| {
-                let mut role = v.clone();
-                role.complete_prompt_args(name);
-                role
-            })
-            .ok_or_else(|| anyhow!("Unknown role `{name}`"))?;
-
+        let names = Self::list_roles(false);
+        let mut role = if let Some(role_name) = Role::match_name(&names, name) {
+            let path = Self::role_file(&role_name)?;
+            let content = read_to_string(&path)?;
+            Role::new(name, &content)
+        } else {
+            Role::builtin(name)?
+        };
         match role.model_id() {
             Some(model_id) => {
                 if self.model.id() != model_id {
                     let model = Model::retrieve_chat(self, model_id)?;
                     role.set_model(&model);
+                } else {
+                    role.set_model(&self.model);
                 }
             }
             None => role.set_model(&self.model),
         }
         Ok(role)
+    }
+
+    pub fn new_role(&mut self, name: &str) -> Result<()> {
+        let ans = Confirm::new("Create a new role?")
+            .with_default(true)
+            .prompt()?;
+        if ans {
+            self.upsert_role(name)?;
+        }
+        Ok(())
+    }
+
+    pub fn edit_role(&mut self) -> Result<()> {
+        if let Some(name) = self.role.as_ref().map(|v| v.name().to_string()) {
+            self.upsert_role(&name)
+        } else {
+            bail!("No role")
+        }
+    }
+
+    pub fn upsert_role(&mut self, name: &str) -> Result<()> {
+        let names = Self::list_roles(false);
+        let role_name = Role::match_name(&names, name).unwrap_or_else(|| name.to_string());
+        let role_path = Self::role_file(&role_name)?;
+        ensure_parent_exists(&role_path)?;
+        let editor = self.editor()?;
+        edit_file(&editor, &role_path)?;
+        self.use_role(name)?;
+        Ok(())
+    }
+
+    pub fn save_role(&mut self, name: Option<&str>) -> Result<()> {
+        let mut role_name = match &self.role {
+            Some(role) => {
+                if role.has_args() {
+                    bail!("Unable to save the role with arguments (whose name contains '#')")
+                }
+                match name {
+                    Some(v) => v.to_string(),
+                    None => role.name().to_string(),
+                }
+            }
+            None => bail!("No role"),
+        };
+        if role_name == TEMP_ROLE_NAME {
+            role_name = Text::new("Role name:")
+                .with_validator(|input: &str| {
+                    let input = input.trim();
+                    if input.is_empty() {
+                        Ok(Validation::Invalid("This name is required".into()))
+                    } else if input == TEMP_ROLE_NAME {
+                        Ok(Validation::Invalid("This name is reserved".into()))
+                    } else {
+                        Ok(Validation::Valid)
+                    }
+                })
+                .prompt()?;
+        }
+        let role_path = Self::role_file(&role_name)?;
+        if let Some(role) = self.role.as_mut() {
+            role.save(&role_name, &role_path, self.working_mode.is_repl())?;
+        }
+
+        Ok(())
+    }
+
+    pub fn all_roles() -> Vec<Role> {
+        let mut roles: HashMap<String, Role> = Role::list_builtin_roles()
+            .iter()
+            .map(|v| (v.name().to_string(), v.clone()))
+            .collect();
+        let names = Self::list_roles(false);
+        for name in names {
+            if let Ok(path) = Self::role_file(&name) {
+                if let Ok(content) = read_to_string(&path) {
+                    let role = Role::new(&name, &content);
+                    roles.insert(name, role);
+                }
+            }
+        }
+        let mut roles: Vec<_> = roles.into_values().collect();
+        roles.sort_unstable_by(|a, b| a.name().cmp(b.name()));
+        roles
+    }
+
+    pub fn list_roles(with_builtin: bool) -> Vec<String> {
+        let mut names = HashSet::new();
+        if let Some(rd) = Self::roles_dir().ok().and_then(|dir| read_dir(dir).ok()) {
+            for entry in rd.flatten() {
+                if let Some(name) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|v| v.strip_suffix(".md"))
+                {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+        if with_builtin {
+            names.extend(Role::list_builtin_role_names());
+        }
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort_unstable();
+        names
+    }
+
+    pub fn has_role(name: &str) -> bool {
+        let names = Self::list_roles(true);
+        Role::match_name(&names, name).is_some()
     }
 
     pub fn use_session(&mut self, session_name: Option<&str>) -> Result<()> {
@@ -755,16 +1056,16 @@ impl Config {
     }
 
     pub fn save_session(&mut self, name: Option<&str>) -> Result<()> {
-        let name = match &self.session {
+        let session_name = match &self.session {
             Some(session) => match name {
                 Some(v) => v.to_string(),
                 None => session.name().to_string(),
             },
             None => bail!("No session"),
         };
-        let session_path = self.session_file(&name)?;
+        let session_path = self.session_file(&session_name)?;
         if let Some(session) = self.session.as_mut() {
-            session.save(&session_path, self.working_mode.is_repl())?;
+            session.save(&session_name, &session_path, self.working_mode.is_repl())?;
         }
         Ok(())
     }
@@ -774,12 +1075,9 @@ impl Config {
             Some(session) => session.name().to_string(),
             None => bail!("No session"),
         };
-        let editor = match self.buffer_editor() {
-            Some(editor) => editor,
-            None => bail!("No editor, please set $EDITOR/$VISUAL."),
-        };
         let session_path = self.session_file(&name)?;
         self.save_session(Some(&name))?;
+        let editor = self.editor()?;
         edit_file(&editor, &session_path).with_context(|| {
             format!(
                 "Failed to edit '{}' with '{editor}'",
@@ -794,6 +1092,9 @@ impl Config {
     pub fn clear_session_messages(&mut self) -> Result<()> {
         if let Some(session) = self.session.as_mut() {
             session.clear_messages();
+            if let Some(prompt) = self.agent.as_ref().map(|v| v.interpolated_instructions()) {
+                session.update_role_prompt(&prompt);
+            }
         } else {
             bail!("No session")
         }
@@ -812,6 +1113,9 @@ impl Config {
                 for entry in rd.flatten() {
                     let name = entry.file_name();
                     if let Some(name) = name.to_string_lossy().strip_suffix(".yaml") {
+                        if name.starts_with(TEMP_SESSION_NAME) {
+                            continue;
+                        }
                         names.push(name.to_string());
                     }
                 }
@@ -888,11 +1192,31 @@ impl Config {
         Ok(())
     }
 
+    pub async fn rebuild_rag(config: &GlobalConfig, abort_signal: AbortSignal) -> Result<()> {
+        let mut rag = match config.read().rag.clone() {
+            Some(v) => v.as_ref().clone(),
+            None => bail!("No RAG"),
+        };
+        rag.rebuild(config, abort_signal).await?;
+        config.write().rag = Some(Arc::new(rag));
+        Ok(())
+    }
+
+    pub fn rag_sources(config: &GlobalConfig) -> Result<String> {
+        match config.read().rag.as_ref() {
+            Some(rag) => match rag.get_last_sources() {
+                Some(v) => Ok(v),
+                None => bail!("No sources"),
+            },
+            None => bail!("No RAG"),
+        }
+    }
+
     pub fn rag_info(&self) -> Result<String> {
         if let Some(rag) = &self.rag {
             rag.export()
         } else {
-            bail!("No rag")
+            bail!("No RAG")
         }
     }
 
@@ -901,7 +1225,36 @@ impl Config {
         Ok(())
     }
 
-    pub fn list_rags(&self) -> Vec<String> {
+    pub async fn search_rag(
+        config: &GlobalConfig,
+        rag: &Rag,
+        text: &str,
+        abort_signal: AbortSignal,
+    ) -> Result<String> {
+        let (reranker_model, top_k) = rag.get_config();
+        let (min_score_vector_search, min_score_keyword_search) = {
+            let config = config.read();
+            (
+                config.rag_min_score_vector_search,
+                config.rag_min_score_keyword_search,
+            )
+        };
+        let (embeddings, ids) = rag
+            .search(
+                text,
+                top_k,
+                min_score_vector_search,
+                min_score_keyword_search,
+                reranker_model.as_deref(),
+                abort_signal,
+            )
+            .await?;
+        let text = config.read().rag_template(&embeddings, text);
+        rag.set_last_sources(&ids);
+        Ok(text)
+    }
+
+    pub fn list_rags() -> Vec<String> {
         let rags_dir = match Self::rags_dir() {
             Ok(dir) => dir,
             Err(_) => return vec![],
@@ -911,7 +1264,7 @@ impl Config {
                 let mut names = vec![];
                 for entry in rd.flatten() {
                     let name = entry.file_name();
-                    if let Some(name) = name.to_string_lossy().strip_suffix(".bin") {
+                    if let Some(name) = name.to_string_lossy().strip_suffix(".yaml") {
                         names.push(name.to_string());
                     }
                 }
@@ -940,17 +1293,17 @@ impl Config {
         abort_signal: AbortSignal,
     ) -> Result<()> {
         if !config.read().function_calling {
-            bail!("Before using the agent, please configure function calling first.");
+            bail!("Please enable function calling before using the agent.");
         }
         if config.read().agent.is_some() {
             bail!("Already in a agent, please run '.exit agent' first to exit the current agent.");
         }
         let agent = Agent::init(config, name, abort_signal).await?;
-        config.write().rag = agent.rag();
-        config.write().agent = Some(agent);
         let session = session
             .map(|v| v.to_string())
-            .or_else(|| config.read().agent_prelude.clone());
+            .or_else(|| agent.agent_prelude().map(|v| v.to_string()));
+        config.write().rag = agent.rag();
+        config.write().agent = Some(agent);
         if let Some(session) = session {
             config.write().use_session(Some(&session))?;
         }
@@ -973,6 +1326,28 @@ impl Config {
         }
     }
 
+    pub fn set_agent_variable(&mut self, data: &str) -> Result<()> {
+        let parts: Vec<&str> = data.split_whitespace().collect();
+        if parts.len() != 2 {
+            bail!("Usage: .variable <key> <value>");
+        }
+        let key = parts[0];
+        let value = parts[1];
+        match self.agent.as_mut() {
+            Some(agent) => agent.set_variable(key, value)?,
+            None => bail!("No agent"),
+        };
+        Ok(())
+    }
+
+    pub fn save_agent_config(&mut self) -> Result<()> {
+        let agent = match &self.agent {
+            Some(v) => v,
+            None => bail!("No agent"),
+        };
+        agent.save_config()
+    }
+
     pub fn exit_agent(&mut self) -> Result<()> {
         self.exit_session()?;
         if self.agent.take().is_some() {
@@ -989,7 +1364,12 @@ impl Config {
             WorkingMode::Serve => return Ok(()),
         };
         let prelude = match prelude {
-            Some(v) => v.to_string(),
+            Some(v) => {
+                if v.is_empty() {
+                    return Ok(());
+                }
+                v.to_string()
+            }
             None => return Ok(()),
         };
 
@@ -1012,107 +1392,168 @@ impl Config {
         Ok(())
     }
 
-    pub fn select_functions(&self, model: &Model, role: &Role) -> Option<Vec<FunctionDeclaration>> {
-        let mut functions = None;
+    pub fn select_functions(&self, role: &Role) -> Option<Vec<FunctionDeclaration>> {
+        let mut functions = vec![];
         if self.function_calling {
-            let filter = role.functions_filter();
-            if let Some(filter) = filter {
-                functions = match &self.agent {
-                    Some(agent) => agent.functions().select(&filter),
-                    None => self.functions.select(&filter),
-                };
-                if !model.supports_function_calling() {
-                    functions = None;
-                    if *IS_STDOUT_TERMINAL {
-                        eprintln!("{}", warning_text("WARNING: This LLM or client does not support function calling, despite the context requiring it."));
+            if let Some(use_tools) = role.use_tools() {
+                let mut tool_names: HashSet<String> = Default::default();
+                let declaration_names: HashSet<String> = self
+                    .functions
+                    .declarations()
+                    .iter()
+                    .map(|v| v.name.to_string())
+                    .collect();
+                if use_tools == "all" {
+                    tool_names.extend(declaration_names);
+                } else {
+                    for item in use_tools.split(',') {
+                        let item = item.trim();
+                        if let Some(values) = self.mapping_tools.get(item) {
+                            tool_names.extend(
+                                values
+                                    .split(',')
+                                    .map(|v| v.to_string())
+                                    .filter(|v| declaration_names.contains(v)),
+                            )
+                        } else if declaration_names.contains(item) {
+                            tool_names.insert(item.to_string());
+                        }
                     }
                 }
+                functions = self
+                    .functions
+                    .declarations()
+                    .iter()
+                    .filter_map(|v| {
+                        if tool_names.contains(&v.name) {
+                            Some(v.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            }
+
+            if let Some(agent) = &self.agent {
+                let mut agent_functions = agent.functions().declarations().to_vec();
+                let tool_names: HashSet<String> = agent_functions
+                    .iter()
+                    .filter_map(|v| {
+                        if v.agent {
+                            None
+                        } else {
+                            Some(v.name.to_string())
+                        }
+                    })
+                    .collect();
+                agent_functions.extend(
+                    functions
+                        .into_iter()
+                        .filter(|v| !tool_names.contains(&v.name)),
+                );
+                functions = agent_functions;
             }
         };
-        functions
-    }
-
-    pub fn is_dangerously_function(&self, name: &str) -> bool {
-        if get_env_bool("no_dangerously_functions") {
-            return false;
-        }
-        let dangerously_functions_filter = match &self.agent {
-            Some(agent) => agent.config().dangerously_functions_filter.as_ref(),
-            None => self.dangerously_functions_filter.as_ref(),
-        };
-        match dangerously_functions_filter {
-            None => false,
-            Some(regex) => {
-                let regex = match Regex::new(&format!("^({regex})$")) {
-                    Ok(v) => v,
-                    Err(_) => return false,
-                };
-                regex.is_match(name).unwrap_or(false)
-            }
+        if functions.is_empty() {
+            None
+        } else {
+            Some(functions)
         }
     }
 
-    pub fn buffer_editor(&self) -> Option<String> {
-        self.buffer_editor
+    pub fn editor(&self) -> Result<String> {
+        self.editor
             .clone()
             .or_else(|| env::var("VISUAL").ok().or_else(|| env::var("EDITOR").ok()))
+            .ok_or_else(|| anyhow!("No editor, please configure `editor` or set $EDITOR/$VISUAL environment variable."))
     }
 
-    pub fn repl_complete(&self, cmd: &str, args: &[&str]) -> Vec<(String, Option<String>)> {
-        let (values, filter) = if args.len() == 1 {
-            let values = match cmd {
-                ".role" => self
-                    .roles
-                    .iter()
-                    .map(|v| (v.name().to_string(), None))
-                    .collect(),
+    pub fn repl_complete(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        line: &str,
+    ) -> Vec<(String, Option<String>)> {
+        let mut values: Vec<(String, Option<String>)> = vec![];
+        let mut filter = "";
+        if args.len() == 1 {
+            values = match cmd {
+                ".role" => map_completion_values(Self::list_roles(true)),
                 ".model" => list_chat_models(self)
                     .into_iter()
                     .map(|v| (v.id(), Some(v.description())))
                     .collect(),
-                ".session" => self
-                    .list_sessions()
-                    .into_iter()
-                    .map(|v| (v, None))
-                    .collect(),
-                ".rag" => self.list_rags().into_iter().map(|v| (v, None)).collect(),
-                ".agent" => list_agents().into_iter().map(|v| (v, None)).collect(),
+                ".session" => map_completion_values(self.list_sessions()),
+                ".rag" => map_completion_values(Self::list_rags()),
+                ".agent" => map_completion_values(list_agents()),
                 ".starter" => match &self.agent {
+                    Some(agent) => map_completion_values(agent.conversation_staters().to_vec()),
+                    None => vec![],
+                },
+                ".variable" => match &self.agent {
                     Some(agent) => agent
-                        .conversation_staters()
+                        .variables()
                         .iter()
-                        .map(|v| (v.clone(), None))
+                        .map(|v| (v.name.clone(), Some(v.description.clone())))
                         .collect(),
                     None => vec![],
                 },
-                ".set" => vec![
-                    "max_output_tokens",
-                    "temperature",
-                    "top_p",
-                    "rag_reranker_model",
-                    "rag_top_k",
-                    "function_calling",
-                    "compress_threshold",
-                    "save",
-                    "save_session",
-                    "highlight",
-                    "dry_run",
-                ]
-                .into_iter()
-                .map(|v| (format!("{v} "), None))
-                .collect(),
+                ".set" => {
+                    let mut values = vec![
+                        "max_output_tokens",
+                        "temperature",
+                        "top_p",
+                        "dry_run",
+                        "stream",
+                        "save",
+                        "function_calling",
+                        "use_tools",
+                        "agent_prelude",
+                        "save_session",
+                        "compress_threshold",
+                        "rag_reranker_model",
+                        "rag_top_k",
+                        "highlight",
+                    ];
+                    values.sort_unstable();
+                    values
+                        .into_iter()
+                        .map(|v| (format!("{v} "), None))
+                        .collect()
+                }
+                ".delete" => map_completion_values(vec!["roles", "sessions", "rags", "agents"]),
                 _ => vec![],
             };
-            (values, args[0])
-        } else if args.len() == 2 {
-            let values = match args[0] {
+            filter = args[0]
+        } else if cmd == ".set" && args.len() == 2 {
+            let candidates = match args[0] {
                 "max_output_tokens" => match self.model.max_output_tokens() {
                     Some(v) => vec![v.to_string()],
                     None => vec![],
                 },
-                "rag_reranker_model" => list_reranker_models(self).iter().map(|v| v.id()).collect(),
-                "function_calling" => complete_bool(self.function_calling),
+                "dry_run" => complete_bool(self.dry_run),
+                "stream" => complete_bool(self.stream),
                 "save" => complete_bool(self.save),
+                "function_calling" => complete_bool(self.function_calling),
+                "use_tools" => {
+                    let mut prefix = String::new();
+                    let mut ignores = HashSet::new();
+                    if let Some((v, _)) = args[1].rsplit_once(',') {
+                        ignores = v.split(',').collect();
+                        prefix = format!("{v},");
+                    }
+                    let mut values = vec![];
+                    if prefix.is_empty() {
+                        values.push("all".to_string());
+                    }
+                    values.extend(self.functions.declarations().iter().map(|v| v.name.clone()));
+                    values.extend(self.mapping_tools.keys().map(|v| v.to_string()));
+                    values
+                        .into_iter()
+                        .filter(|v| !ignores.contains(v.as_str()))
+                        .map(|v| format!("{prefix}{v}"))
+                        .collect()
+                }
                 "save_session" => {
                     let save_session = if let Some(session) = &self.session {
                         session.save_session()
@@ -1121,13 +1562,20 @@ impl Config {
                     };
                     complete_option_bool(save_session)
                 }
+                "rag_reranker_model" => list_reranker_models(self).iter().map(|v| v.id()).collect(),
                 "highlight" => complete_bool(self.highlight),
-                "dry_run" => complete_bool(self.dry_run),
                 _ => vec![],
             };
-            (values.into_iter().map(|v| (v, None)).collect(), args[1])
-        } else {
-            return vec![];
+            values = candidates.into_iter().map(|v| (v, None)).collect();
+            filter = args[1];
+        } else if cmd == ".starter" && args.len() >= 2 {
+            if let Some(agent) = &self.agent {
+                values = agent
+                    .conversation_staters()
+                    .iter()
+                    .filter_map(|v| v.strip_prefix(line).map(|x| (x.to_string(), None)))
+                    .collect()
+            }
         };
         values
             .into_iter()
@@ -1149,7 +1597,7 @@ impl Config {
             let theme_path = Self::local_path(&theme_filename)?;
             if theme_path.exists() {
                 let theme = ThemeSet::get_theme(&theme_path)
-                    .with_context(|| format!("Invalid theme at {}", theme_path.display()))?;
+                    .with_context(|| format!("Invalid theme at '{}'", theme_path.display()))?;
                 Some(theme)
             } else {
                 let theme = if self.light_theme {
@@ -1186,6 +1634,17 @@ impl Config {
         render_prompt(right_prompt, &variables)
     }
 
+    pub fn print_markdown(&self, text: &str) -> Result<()> {
+        if *IS_STDOUT_TERMINAL {
+            let render_options = self.render_options()?;
+            let mut markdown_render = MarkdownRender::init(render_options)?;
+            println!("{}", markdown_render.render(text));
+        } else {
+            println!("{text}");
+        }
+        Ok(())
+    }
+
     fn generate_prompt_context(&self) -> HashMap<&str, String> {
         let mut output = HashMap::new();
         let role = self.extract_role();
@@ -1211,6 +1670,9 @@ impl Config {
         }
         if self.dry_run {
             output.insert("dry_run", "true".to_string());
+        }
+        if self.stream {
+            output.insert("stream", "true".to_string());
         }
         if self.save {
             output.insert("save", "true".to_string());
@@ -1335,9 +1797,9 @@ impl Config {
             .with_context(|| format!("Failed to create/append {}", path.display()))
     }
 
-    fn load_config_file(config_path: &Path) -> Result<Self> {
+    fn load_from_file(config_path: &Path) -> Result<Self> {
         let content = read_to_string(config_path)
-            .with_context(|| format!("Failed to load config at {}", config_path.display()))?;
+            .with_context(|| format!("Failed to load config at '{}'", config_path.display()))?;
         let config: Self = serde_yaml::from_str(&content).map_err(|err| {
             let err_msg = err.to_string();
             let err_msg = if err_msg.starts_with(&format!("{}: ", CLIENTS_FIELD)) {
@@ -1357,10 +1819,10 @@ impl Config {
         Ok(config)
     }
 
-    fn load_config_env(platform: &str) -> Result<Self> {
-        let model_id = match env::var(get_env_name("model_name")) {
-            Ok(model_name) => format!("{platform}:{model_name}"),
-            Err(_) => platform.to_string(),
+    fn load_dynamic(model_id: &str) -> Result<Self> {
+        let platform = match model_id.split_once(':') {
+            Some((v, _)) => v,
+            _ => model_id,
         };
         let is_openai_compatible = OPENAI_COMPATIBLE_PLATFORMS
             .into_iter()
@@ -1371,7 +1833,7 @@ impl Config {
             json!({ "type": platform })
         };
         let config = json!({
-            "model": model_id,
+            "model": model_id.to_string(),
             "save": false,
             "clients": vec![client],
         });
@@ -1380,63 +1842,152 @@ impl Config {
         Ok(config)
     }
 
-    fn load_roles(&mut self) -> Result<()> {
-        let path = Self::roles_file()?;
-        self.roles = if !path.exists() {
-            vec![]
-        } else {
-            let content = read_to_string(&path)
-                .with_context(|| format!("Failed to load roles at {}", path.display()))?;
-            serde_yaml::from_str(&content).with_context(|| "Invalid roles config")?
-        };
-        let exist_roles: HashSet<_> = self.roles.iter().map(|v| v.name().to_string()).collect();
-        let builtin_roles = Role::builtin();
-        for role in builtin_roles {
-            if !exist_roles.contains(role.name()) {
-                self.roles.push(role);
+    fn load_envs(&mut self) {
+        if let Ok(v) = env::var(get_env_name("model")) {
+            self.model_id = v;
+        }
+        if let Some(v) = read_env_value::<f64>("temperature") {
+            self.temperature = v;
+        }
+        if let Some(v) = read_env_value::<f64>("top_p") {
+            self.top_p = v;
+        }
+
+        if let Some(Some(v)) = read_env_bool("dry_run") {
+            self.dry_run = v;
+        }
+        if let Some(Some(v)) = read_env_bool("stream") {
+            self.stream = v;
+        }
+        if let Some(Some(v)) = read_env_bool("save") {
+            self.save = v;
+        }
+        if let Ok(v) = env::var(get_env_name("keybindings")) {
+            if v == "vi" {
+                self.keybindings = v;
             }
         }
+        if let Some(v) = read_env_value::<String>("editor") {
+            self.editor = v;
+        }
+        if let Some(v) = read_env_value::<String>("wrap") {
+            self.wrap = v;
+        }
+        if let Some(Some(v)) = read_env_bool("wrap_code") {
+            self.wrap_code = v;
+        }
+
+        if let Some(Some(v)) = read_env_bool("function_calling") {
+            self.function_calling = v;
+        }
+        if let Ok(v) = env::var(get_env_name("mapping_tools")) {
+            if let Ok(v) = serde_json::from_str(&v) {
+                self.mapping_tools = v;
+            }
+        }
+        if let Some(v) = read_env_value::<String>("use_tools") {
+            self.use_tools = v;
+        }
+
+        if let Some(v) = read_env_value::<String>("prelude") {
+            self.prelude = v;
+        }
+        if let Some(v) = read_env_value::<String>("repl_prelude") {
+            self.repl_prelude = v;
+        }
+        if let Some(v) = read_env_value::<String>("agent_prelude") {
+            self.agent_prelude = v;
+        }
+
+        if let Some(v) = read_env_bool("save_session") {
+            self.save_session = v;
+        }
+        if let Some(Some(v)) = read_env_value::<usize>("compress_threshold") {
+            self.compress_threshold = v;
+        }
+        if let Some(v) = read_env_value::<String>("summarize_prompt") {
+            self.summarize_prompt = v;
+        }
+        if let Some(v) = read_env_value::<String>("summary_prompt") {
+            self.summary_prompt = v;
+        }
+
+        if let Some(v) = read_env_value::<String>("rag_embedding_model") {
+            self.rag_embedding_model = v;
+        }
+        if let Some(v) = read_env_value::<String>("rag_reranker_model") {
+            self.rag_reranker_model = v;
+        }
+        if let Some(Some(v)) = read_env_value::<usize>("rag_top_k") {
+            self.rag_top_k = v;
+        }
+        if let Some(v) = read_env_value::<usize>("rag_chunk_size") {
+            self.rag_chunk_size = v;
+        }
+        if let Some(v) = read_env_value::<usize>("rag_chunk_overlap") {
+            self.rag_chunk_overlap = v;
+        }
+        if let Some(Some(v)) = read_env_value::<f32>("rag_min_score_vector_search") {
+            self.rag_min_score_vector_search = v;
+        }
+        if let Some(Some(v)) = read_env_value::<f32>("rag_min_score_keyword_search") {
+            self.rag_min_score_keyword_search = v;
+        }
+        if let Some(v) = read_env_value::<String>("rag_template") {
+            self.rag_template = v;
+        }
+
+        if let Ok(v) = env::var(get_env_name("document_loaders")) {
+            if let Ok(v) = serde_json::from_str(&v) {
+                self.document_loaders = v;
+            }
+        }
+
+        if let Some(Some(v)) = read_env_bool("highlight") {
+            self.highlight = v;
+        }
+        if let Ok(value) = env::var("NO_COLOR") {
+            if let Some(false) = parse_bool(&value) {
+                self.highlight = false;
+            }
+        }
+        if let Some(Some(v)) = read_env_bool("light_theme") {
+            self.light_theme = v;
+        } else if !self.light_theme {
+            if let Ok(v) = env::var("COLORFGBG") {
+                if let Some(v) = light_theme_from_colorfgbg(&v) {
+                    self.light_theme = v
+                }
+            }
+        }
+        if let Some(v) = read_env_value::<String>("left_prompt") {
+            self.left_prompt = v;
+        }
+        if let Some(v) = read_env_value::<String>("right_prompt") {
+            self.right_prompt = v;
+        }
+
+        if let Some(v) = read_env_value::<String>("serve_addr") {
+            self.serve_addr = v;
+        }
+    }
+
+    fn load_functions(&mut self) -> Result<()> {
+        self.functions = Functions::init(&Self::functions_file()?)?;
         Ok(())
     }
 
     fn setup_model(&mut self) -> Result<()> {
-        let model_id = if self.model_id.is_empty() {
+        let mut model_id = self.model_id.clone();
+        if model_id.is_empty() {
             let models = list_chat_models(self);
             if models.is_empty() {
                 bail!("No available model");
             }
-
-            models[0].id()
-        } else {
-            self.model_id.clone()
+            model_id = models[0].id()
         };
         self.set_model(&model_id)?;
         self.model_id = model_id;
-        Ok(())
-    }
-
-    fn setup_highlight(&mut self) {
-        if let Ok(value) = env::var("NO_COLOR") {
-            let mut no_color = false;
-            set_bool(&mut no_color, &value);
-            if no_color {
-                self.highlight = false;
-            }
-        }
-    }
-
-    fn setup_light_theme(&mut self) -> Result<()> {
-        if self.light_theme {
-            return Ok(());
-        }
-        if let Ok(value) = env::var(get_env_name("light_theme")) {
-            set_bool(&mut self.light_theme, &value);
-            return Ok(());
-        } else if let Ok(value) = env::var("COLORFGBG") {
-            if let Some(light) = light_theme_from_colorfgbg(&value) {
-                self.light_theme = light
-            }
-        };
         Ok(())
     }
 
@@ -1450,25 +2001,23 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-pub enum Keybindings {
-    #[serde(rename = "emacs")]
-    #[default]
-    Emacs,
-    #[serde(rename = "vi")]
-    Vi,
-}
-
-impl Keybindings {
-    pub fn is_vi(&self) -> bool {
-        matches!(self, Keybindings::Vi)
-    }
-    pub fn stringify(&self) -> &str {
-        match self {
-            Keybindings::Emacs => "emacs",
-            Keybindings::Vi => "vi",
+pub fn load_env_file() -> Result<()> {
+    let env_file_path = Config::env_file()?;
+    let contents = match read_to_string(&env_file_path) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    debug!("Use env file '{}'", env_file_path.display());
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            env::set_var(key.trim(), value.trim());
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1552,11 +2101,11 @@ pub(crate) fn ensure_parent_exists(path: &Path) -> Result<()> {
     }
     let parent = path
         .parent()
-        .ok_or_else(|| anyhow!("Failed to write to {}, No parent path", path.display()))?;
+        .ok_or_else(|| anyhow!("Failed to write to '{}', No parent path", path.display()))?;
     if !parent.exists() {
         create_dir_all(parent).with_context(|| {
             format!(
-                "Failed to write {}, Cannot create parent directory",
+                "Failed to write to '{}', Cannot create parent directory",
                 path.display()
             )
         })?;
@@ -1564,12 +2113,13 @@ pub(crate) fn ensure_parent_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn set_bool(target: &mut bool, value: &str) {
-    match value {
-        "1" | "true" => *target = true,
-        "0" | "false" => *target = false,
-        _ => {}
-    }
+fn read_env_value<T>(key: &str) -> Option<Option<T>>
+where
+    T: std::str::FromStr,
+{
+    let value = env::var(get_env_name(key)).ok()?;
+    let value = parse_value(&value).ok()?;
+    Some(value)
 }
 
 fn parse_value<T>(value: &str) -> Result<Option<T>>
@@ -1588,6 +2138,19 @@ where
     Ok(value)
 }
 
+fn read_env_bool(key: &str) -> Option<Option<bool>> {
+    let value = env::var(get_env_name(key)).ok()?;
+    Some(parse_bool(&value))
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
 fn complete_bool(value: bool) -> Vec<String> {
     vec![(!value).to_string()]
 }
@@ -1598,4 +2161,21 @@ fn complete_option_bool(value: Option<bool>) -> Vec<String> {
         Some(false) => vec!["true".to_string(), "null".to_string()],
         None => vec!["true".to_string(), "false".to_string()],
     }
+}
+
+fn map_completion_values<T: ToString>(value: Vec<T>) -> Vec<(String, Option<String>)> {
+    value.into_iter().map(|v| (v.to_string(), None)).collect()
+}
+
+fn update_rag<F>(config: &GlobalConfig, f: F) -> Result<()>
+where
+    F: FnOnce(&mut Rag) -> Result<()>,
+{
+    let mut rag = match config.read().rag.clone() {
+        Some(v) => v.as_ref().clone(),
+        None => bail!("No RAG"),
+    };
+    f(&mut rag)?;
+    config.write().rag = Some(Arc::new(rag));
+    Ok(())
 }

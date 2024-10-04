@@ -34,19 +34,25 @@ impl SseHandler {
         let ret = self
             .sender
             .send(SseEvent::Text(text.to_string()))
-            .with_context(|| "Failed to send ReplyEvent:Text");
-        self.safe_ret(ret)?;
+            .with_context(|| "Failed to send SseEvent:Text");
+        if let Err(err) = ret {
+            if self.abort.aborted() {
+                return Ok(());
+            }
+            return Err(err);
+        }
         Ok(())
     }
 
-    pub fn done(&mut self) -> Result<()> {
+    pub fn done(&mut self) {
         // debug!("HandleDone");
-        let ret = self
-            .sender
-            .send(SseEvent::Done)
-            .with_context(|| "Failed to send ReplyEvent::Done");
-        self.safe_ret(ret)?;
-        Ok(())
+        let ret = self.sender.send(SseEvent::Done);
+        if ret.is_err() {
+            if self.abort.aborted() {
+                return;
+            }
+            warn!("Failed to send SseEvent:Done");
+        }
     }
 
     pub fn tool_call(&mut self, call: ToolCall) -> Result<()> {
@@ -59,18 +65,15 @@ impl SseHandler {
         self.abort.clone()
     }
 
+    pub fn get_tool_calls(&self) -> &[ToolCall] {
+        &self.tool_calls
+    }
+
     pub fn take(self) -> (String, Vec<ToolCall>) {
         let Self {
             buffer, tool_calls, ..
         } = self;
         (buffer, tool_calls)
-    }
-
-    fn safe_ret(&self, ret: Result<()>) -> Result<()> {
-        if ret.is_err() && self.abort.aborted() {
-            return Ok(());
-        }
-        ret
     }
 }
 
@@ -82,6 +85,7 @@ pub enum SseEvent {
 
 #[derive(Debug)]
 pub struct SseMmessage {
+    #[allow(unused)]
     pub event: String,
     pub data: String,
 }

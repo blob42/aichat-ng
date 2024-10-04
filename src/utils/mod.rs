@@ -2,30 +2,33 @@ mod abort_signal;
 mod clipboard;
 mod command;
 mod crypto;
+mod html_to_md;
+mod path;
 mod prompt_input;
 mod render_prompt;
 mod request;
 mod spinner;
+mod variables;
 
 pub use self::abort_signal::*;
 pub use self::clipboard::set_text;
 pub use self::command::*;
 pub use self::crypto::*;
+pub use self::html_to_md::*;
+pub use self::path::*;
 pub use self::prompt_input::*;
 pub use self::render_prompt::render_prompt;
 pub use self::request::*;
-pub use self::spinner::{create_spinner, Spinner};
+pub use self::spinner::*;
+pub use self::variables::*;
 
 use anyhow::{Context, Result};
 use fancy_regex::Regex;
 use is_terminal::IsTerminal;
-use lazy_static::lazy_static;
-use std::{
-    env,
-    path::{self, Path, PathBuf},
-};
+use std::{env, path::PathBuf, process};
+use unicode_segmentation::UnicodeSegmentation;
 
-lazy_static! {
+lazy_static::lazy_static! {
     pub static ref CODE_BLOCK_RE: Regex = Regex::new(r"(?ms)```\w*(.*)```").unwrap();
     pub static ref IS_STDOUT_TERMINAL: bool = std::io::stdout().is_terminal();
 }
@@ -36,46 +39,29 @@ pub fn now() -> String {
 }
 
 pub fn get_env_name(key: &str) -> String {
-    format!(
-        "{}_{}",
-        env!("CARGO_CRATE_NAME").to_uppercase(),
-        key.to_uppercase(),
-    )
+    format!("{}_{key}", env!("CARGO_CRATE_NAME"),).to_ascii_uppercase()
 }
 
-pub fn get_env_bool(key: &str) -> bool {
-    if let Ok(value) = env::var(get_env_name(key)) {
-        value == "1" || value == "true"
-    } else {
-        false
-    }
-}
-
-pub fn tokenize(text: &str) -> Vec<&str> {
-    if text.is_ascii() {
-        text.split_inclusive(|c: char| c.is_ascii_whitespace())
-            .collect()
-    } else {
-        unicode_segmentation::UnicodeSegmentation::graphemes(text, true).collect()
-    }
+pub fn normalize_env_name(value: &str) -> String {
+    value.replace('-', "_").to_ascii_uppercase()
 }
 
 pub fn estimate_token_length(text: &str) -> usize {
-    let mut token_length: f32 = 0.0;
-
-    for char in text.chars() {
-        if char.is_ascii() {
-            if char.is_ascii_alphabetic() {
-                token_length += 0.25;
-            } else {
-                token_length += 0.5;
-            }
+    let words: Vec<&str> = text.unicode_words().collect();
+    let mut output: f32 = 0.0;
+    for word in words {
+        if word.is_ascii() {
+            output += 1.3;
         } else {
-            token_length += 1.5;
+            let count = word.chars().count();
+            if count == 1 {
+                output += 1.0
+            } else {
+                output += (count as f32) * 0.5;
+            }
         }
     }
-
-    token_length.ceil() as usize
+    output.ceil() as usize
 }
 
 pub fn light_theme_from_colorfgbg(colorfgbg: &str) -> Option<bool> {
@@ -139,16 +125,28 @@ pub fn fuzzy_match(text: &str, pattern: &str) -> bool {
     pattern_index == pattern_chars.len()
 }
 
+pub fn pretty_error(err: &anyhow::Error) -> String {
+    let mut output = vec![];
+    output.push(err.to_string());
+    output.push("Caused by:".to_string());
+    for (i, cause) in err.chain().skip(1).enumerate() {
+        output.push(format!("    {i}: {cause}"));
+    }
+    output.push(String::new());
+    output.join("\n")
+}
+
 pub fn error_text(input: &str) -> String {
-    nu_ansi_term::Style::new()
-        .fg(nu_ansi_term::Color::Red)
-        .paint(input)
-        .to_string()
+    color_text(input, nu_ansi_term::Color::Red)
 }
 
 pub fn warning_text(input: &str) -> String {
+    color_text(input, nu_ansi_term::Color::Yellow)
+}
+
+pub fn color_text(input: &str, color: nu_ansi_term::Color) -> String {
     nu_ansi_term::Style::new()
-        .fg(nu_ansi_term::Color::Yellow)
+        .fg(color)
         .paint(input)
         .to_string()
 }
@@ -157,38 +155,17 @@ pub fn dimmed_text(input: &str) -> String {
     nu_ansi_term::Style::new().dimmed().paint(input).to_string()
 }
 
-pub fn safe_join_path<T1: AsRef<Path>, T2: AsRef<Path>>(
-    base_path: T1,
-    sub_path: T2,
-) -> Option<PathBuf> {
-    let base_path = base_path.as_ref();
-    let sub_path = sub_path.as_ref();
-    if sub_path.is_absolute() {
-        return None;
-    }
-
-    let mut joined_path = PathBuf::from(base_path);
-
-    for component in sub_path.components() {
-        if path::Component::ParentDir == component {
-            return None;
-        }
-        joined_path.push(component);
-    }
-
-    if joined_path.starts_with(base_path) {
-        Some(joined_path)
-    } else {
-        None
-    }
-}
-
 pub fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
     env::temp_dir().join(format!(
-        "{}{prefix}{}{suffix}",
+        "{}-{}{prefix}{}{suffix}",
         env!("CARGO_CRATE_NAME").to_lowercase(),
+        process::id(),
         uuid::Uuid::new_v4()
     ))
+}
+
+pub fn is_url(path: &str) -> bool {
+    path.starts_with("http://") || path.starts_with("https://")
 }
 
 pub fn set_proxy(
