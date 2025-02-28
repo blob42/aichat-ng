@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::utils::strip_think_tag;
+
 use anyhow::{bail, Context, Result};
 use reqwest::RequestBuilder;
 use serde::Deserialize;
@@ -23,8 +25,7 @@ impl OpenAIClient {
     config_get_fn!(api_key, get_api_key);
     config_get_fn!(api_base, get_api_base);
 
-    pub const PROMPTS: [PromptAction<'static>; 1] =
-        [("api_key", "API Key:", true, PromptKind::String)];
+    pub const PROMPTS: [PromptAction<'static>; 1] = [("api_key", "API Key", None)];
 }
 
 impl_client_trait!(
@@ -101,15 +102,16 @@ pub async fn openai_chat_completions_streaming(
     handler: &mut SseHandler,
     _model: &Model,
 ) -> Result<()> {
-    let mut function_index = 0;
+    let mut call_id = String::new();
     let mut function_name = String::new();
     let mut function_arguments = String::new();
     let mut function_id = String::new();
+    let mut reasoning_state = 0;
     let handle = |message: SseMmessage| -> Result<bool> {
         if message.data == "[DONE]" {
             if !function_name.is_empty() {
                 let arguments: Value = function_arguments.parse().with_context(|| {
-                    format!("Tool call '{function_name}' is invalid: arguments must be in valid JSON format")
+                    format!("Tool call '{function_name}' have non-JSON arguments '{function_arguments}'")
                 })?;
                 handler.tool_call(ToolCall::new(
                     function_name.clone(),
@@ -121,18 +123,38 @@ pub async fn openai_chat_completions_streaming(
         }
         let data: Value = serde_json::from_str(&message.data)?;
         debug!("stream-data: {data}");
-        if let Some(text) = data["choices"][0]["delta"]["content"].as_str() {
+        if let Some(text) = data["choices"][0]["delta"]["content"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+        {
+            if reasoning_state == 1 {
+                handler.text("\n</think>\n\n")?;
+                reasoning_state = 0;
+            }
             handler.text(text)?;
-        } else if let (Some(function), index, id) = (
+        } else if let Some(text) = data["choices"][0]["delta"]["reasoning_content"]
+            .as_str()
+            .or_else(|| data["choices"][0]["delta"]["reasoning"].as_str())
+            .filter(|v| !v.is_empty())
+        {
+            if reasoning_state == 0 {
+                handler.text("<think>\n")?;
+                reasoning_state = 1;
+            }
+            handler.text(text)?;
+        }
+        if let (Some(function), index, id) = (
             data["choices"][0]["delta"]["tool_calls"][0]["function"].as_object(),
             data["choices"][0]["delta"]["tool_calls"][0]["index"].as_u64(),
-            data["choices"][0]["delta"]["tool_calls"][0]["id"].as_str(),
+            data["choices"][0]["delta"]["tool_calls"][0]["id"]
+                .as_str()
+                .filter(|v| !v.is_empty()),
         ) {
-            let index = index.unwrap_or_default();
-            if index != function_index {
+            let maybe_call_id = format!("{}/{}", id.unwrap_or_default(), index.unwrap_or_default());
+            if maybe_call_id != call_id && maybe_call_id.len() >= call_id.len() {
                 if !function_name.is_empty() {
                     let arguments: Value = function_arguments.parse().with_context(|| {
-                        format!("Tool call '{function_name}' is invalid: arguments must be in valid JSON format")
+                        format!("Tool call '{function_name}' have non-JSON arguments '{function_arguments}'")
                     })?;
                     handler.tool_call(ToolCall::new(
                         function_name.clone(),
@@ -143,7 +165,7 @@ pub async fn openai_chat_completions_streaming(
                 function_name.clear();
                 function_arguments.clear();
                 function_id.clear();
-                function_index = index;
+                call_id = maybe_call_id;
             }
             if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
                 if name.starts_with(&function_name) {
@@ -200,13 +222,19 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
         stream,
     } = data;
 
+    let messages_len = messages.len();
     let messages: Vec<Value> = messages
         .into_iter()
-        .flat_map(|message| {
+        .enumerate()
+        .flat_map(|(i, message)| {
             let Message { role, content } = message;
             match content {
-                MessageContent::ToolResults((tool_results, text)) => {
-                    if let Some(true) = tool_results.first().map(|v| v.call.id.is_some()) {
+                MessageContent::ToolCalls(MessageContentToolCalls {
+                        tool_results,
+                        text,
+                        sequence,
+                    }) => {
+                    if !sequence {
                         let tool_calls: Vec<_> = tool_results.iter().map(|tool_result| {
                             json!({
                                 "id": tool_result.call.id,
@@ -236,7 +264,7 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
                             vec![
                                 json!({
                                     "role": MessageRole::Assistant,
-                                    "content": null,
+                                    "content": "",
                                     "tool_calls": [
                                         {
                                             "id": tool_result.call.id,
@@ -258,18 +286,29 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
                         }).collect()
                     }
                 },
+                MessageContent::Text(text) if role.is_assistant() && i != messages_len - 1 => vec![
+                    json!({ "role": role, "content": strip_think_tag(&text) }
+                )],
                 _ => vec![json!({ "role": role, "content": content })]
             }
         })
         .collect();
 
     let mut body = json!({
-        "model": &model.name(),
+        "model": &model.real_name(),
         "messages": messages,
     });
 
     if let Some(v) = model.max_tokens_param() {
-        body["max_tokens"] = v.into();
+        if model
+            .patch()
+            .and_then(|v| v.get("body").and_then(|v| v.get("max_tokens")))
+            == Some(&Value::Null)
+        {
+            body["max_completion_tokens"] = v.into();
+        } else {
+            body["max_tokens"] = v.into();
+        }
     }
     if let Some(v) = temperature {
         body["temperature"] = v.into();
@@ -297,7 +336,7 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
 pub fn openai_build_embeddings_body(data: &EmbeddingsData, model: &Model) -> Value {
     json!({
         "input": data.texts,
-        "model": model.name()
+        "model": model.real_name()
     })
 }
 
@@ -305,6 +344,12 @@ pub fn openai_extract_chat_completions(data: &Value) -> Result<ChatCompletionsOu
     let text = data["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or_default();
+
+    let reasoning = data["choices"][0]["message"]["reasoning_content"]
+        .as_str()
+        .or_else(|| data["choices"][0]["message"]["reasoning"].as_str())
+        .unwrap_or_default()
+        .trim();
 
     let mut tool_calls = vec![];
     if let Some(calls) = data["choices"][0]["message"]["tool_calls"].as_array() {
@@ -315,7 +360,7 @@ pub fn openai_extract_chat_completions(data: &Value) -> Result<ChatCompletionsOu
                 call["id"].as_str(),
             ) {
                 let arguments: Value = arguments.parse().with_context(|| {
-                    format!("Tool call '{name}' is invalid: arguments must be in valid JSON format")
+                    format!("Tool call '{name}' have non-JSON arguments '{arguments}'")
                 })?;
                 tool_calls.push(ToolCall::new(
                     name.to_string(),
@@ -329,8 +374,13 @@ pub fn openai_extract_chat_completions(data: &Value) -> Result<ChatCompletionsOu
     if text.is_empty() && tool_calls.is_empty() {
         bail!("Invalid response data: {data}");
     }
+    let text = if !reasoning.is_empty() {
+        format!("<think>\n{reasoning}\n</think>\n\n{text}")
+    } else {
+        text.to_string()
+    };
     let output = ChatCompletionsOutput {
-        text: text.to_string(),
+        text,
         tool_calls,
         id: data["id"].as_str().map(|v| v.to_string()),
         input_tokens: data["usage"]["prompt_tokens"].as_u64(),

@@ -10,16 +10,16 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub struct SseHandler {
     sender: UnboundedSender<SseEvent>,
-    abort: AbortSignal,
+    abort_signal: AbortSignal,
     buffer: String,
     tool_calls: Vec<ToolCall>,
 }
 
 impl SseHandler {
-    pub fn new(sender: UnboundedSender<SseEvent>, abort: AbortSignal) -> Self {
+    pub fn new(sender: UnboundedSender<SseEvent>, abort_signal: AbortSignal) -> Self {
         Self {
             sender,
-            abort,
+            abort_signal,
             buffer: String::new(),
             tool_calls: Vec::new(),
         }
@@ -36,7 +36,7 @@ impl SseHandler {
             .send(SseEvent::Text(text.to_string()))
             .with_context(|| "Failed to send SseEvent:Text");
         if let Err(err) = ret {
-            if self.abort.aborted() {
+            if self.abort_signal.aborted() {
                 return Ok(());
             }
             return Err(err);
@@ -48,7 +48,7 @@ impl SseHandler {
         // debug!("HandleDone");
         let ret = self.sender.send(SseEvent::Done);
         if ret.is_err() {
-            if self.abort.aborted() {
+            if self.abort_signal.aborted() {
                 return;
             }
             warn!("Failed to send SseEvent:Done");
@@ -61,11 +61,11 @@ impl SseHandler {
         Ok(())
     }
 
-    pub fn get_abort(&self) -> AbortSignal {
-        self.abort.clone()
+    pub fn abort(&self) -> AbortSignal {
+        self.abort_signal.clone()
     }
 
-    pub fn get_tool_calls(&self) -> &[ToolCall] {
+    pub fn tool_calls(&self) -> &[ToolCall] {
         &self.tool_calls
     }
 
@@ -243,13 +243,13 @@ mod tests {
 
     use bytes::Bytes;
     use futures_util::stream;
-    use rand::{thread_rng, Rng};
+    use rand::Rng;
 
     fn split_chunks(text: &str) -> Vec<Vec<u8>> {
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
         let len = text.len();
-        let cut1 = rng.gen_range(1..len - 1);
-        let cut2 = rng.gen_range(cut1 + 1..len);
+        let cut1 = rng.random_range(1..len - 1);
+        let cut2 = rng.random_range(cut1 + 1..len);
         let chunk1 = text[..cut1].as_bytes().to_vec();
         let chunk2 = text[cut1..cut2].as_bytes().to_vec();
         let chunk3 = text[cut2..].as_bytes().to_vec();

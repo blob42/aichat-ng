@@ -52,11 +52,12 @@ macro_rules! register_client {
                 pub fn list_models(local_config: &$config) -> Vec<Model> {
                     let client_name = Self::name(local_config);
                     if local_config.models.is_empty() {
-                        if let Some(models) = $crate::client::ALL_MODELS.iter().find(|v| {
-                            v.platform == $name ||
-                                ($name == OpenAICompatibleClient::NAME && local_config.name.as_deref() == Some(&v.platform))
+                        if let Some(v) = $crate::client::ALL_PROVIDER_MODELS.iter().find(|v| {
+                            v.provider == $name ||
+                                ($name == OpenAICompatibleClient::NAME
+                                    && local_config.name.as_ref().map(|name| name.starts_with(&v.provider)).unwrap_or_default())
                         }) {
-                            return Model::from_config(client_name, &models.models);
+                            return Model::from_config(client_name, &v.models);
                         }
                         vec![]
                     } else {
@@ -82,49 +83,56 @@ macro_rules! register_client {
 
         pub fn list_client_types() -> Vec<&'static str> {
             let mut client_types: Vec<_> = vec![$($client::NAME,)+];
-            client_types.extend($crate::client::OPENAI_COMPATIBLE_PLATFORMS.iter().map(|(name, _)| *name));
+            client_types.extend($crate::client::OPENAI_COMPATIBLE_PROVIDERS.iter().map(|(name, _)| *name));
             client_types
         }
 
-        pub fn create_client_config(client: &str) -> anyhow::Result<(String, serde_json::Value)> {
+        pub async fn create_client_config(client: &str) -> anyhow::Result<(String, serde_json::Value)> {
             $(
-                if client == $client::NAME {
-                    return create_config(&$client::PROMPTS, $client::NAME)
+                if client == $client::NAME && client != $crate::client::OpenAICompatibleClient::NAME {
+                    return create_config(&$client::PROMPTS, $client::NAME).await
                 }
             )+
-            if let Some(ret) = create_openai_compatible_client_config(client)? {
+            if let Some(ret) = create_openai_compatible_client_config(client).await? {
                 return Ok(ret);
             }
             anyhow::bail!("Unknown client '{}'", client)
         }
 
-        static mut ALL_CLIENT_MODELS: Option<Vec<$crate::client::Model>> = None;
+        static ALL_CLIENT_NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
-        pub fn list_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            if unsafe { ALL_CLIENT_MODELS.is_none() } {
-                let models: Vec<_> = config
+        pub fn list_client_names(config: &$crate::config::Config) -> Vec<&'static String> {
+            let names = ALL_CLIENT_NAMES.get_or_init(|| {
+                config
+                    .clients
+                    .iter()
+                    .flat_map(|v| match v {
+                        $(ClientConfig::$config(c) => vec![$client::name(c).to_string()],)+
+                        ClientConfig::Unknown => vec![],
+                    })
+                    .collect()
+            });
+            names.iter().collect()
+        }
+
+        static ALL_MODELS: std::sync::OnceLock<Vec<$crate::client::Model>> = std::sync::OnceLock::new();
+
+        pub fn list_all_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
+            let models = ALL_MODELS.get_or_init(|| {
+                config
                     .clients
                     .iter()
                     .flat_map(|v| match v {
                         $(ClientConfig::$config(c) => $client::list_models(c),)+
                         ClientConfig::Unknown => vec![],
                     })
-                    .collect();
-                unsafe { ALL_CLIENT_MODELS = Some(models) };
-            }
-            unsafe { ALL_CLIENT_MODELS.as_ref().unwrap().iter().collect() }
+                    .collect()
+            });
+            models.iter().collect()
         }
 
-        pub fn list_chat_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            list_models(config).into_iter().filter(|v| v.model_type() == "chat").collect()
-        }
-
-        pub fn list_embedding_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            list_models(config).into_iter().filter(|v| v.model_type() == "embedding").collect()
-        }
-
-        pub fn list_reranker_models(config: &$crate::config::Config) -> Vec<&'static $crate::client::Model> {
-            list_models(config).into_iter().filter(|v| v.model_type() == "reranker").collect()
+        pub fn list_models(config: &$crate::config::Config, model_type: $crate::client::ModelType) -> Vec<&'static $crate::client::Model> {
+            list_all_models(config).into_iter().filter(|v| v.model_type() == model_type).collect()
         }
     };
 }
@@ -176,7 +184,7 @@ macro_rules! impl_client_trait {
                 data: $crate::client::ChatCompletionsData,
             ) -> anyhow::Result<$crate::client::ChatCompletionsOutput> {
                 let request_data = $prepare_chat_completions(self, data)?;
-                let builder = self.request_builder(client, request_data, ApiType::ChatCompletions);
+                let builder = self.request_builder(client, request_data);
                 $chat_completions(builder, self.model()).await
             }
 
@@ -187,7 +195,7 @@ macro_rules! impl_client_trait {
                 data: $crate::client::ChatCompletionsData,
             ) -> Result<()> {
                 let request_data = $prepare_chat_completions(self, data)?;
-                let builder = self.request_builder(client, request_data, ApiType::ChatCompletions);
+                let builder = self.request_builder(client, request_data);
                 $chat_completions_streaming(builder, handler, self.model()).await
             }
 
@@ -197,7 +205,7 @@ macro_rules! impl_client_trait {
                 data: &$crate::client::EmbeddingsData,
             ) -> Result<$crate::client::EmbeddingsOutput> {
                 let request_data = $prepare_embeddings(self, data)?;
-                let builder = self.request_builder(client, request_data, ApiType::Embeddings);
+                let builder = self.request_builder(client, request_data);
                 $embeddings(builder, self.model()).await
             }
 
@@ -207,7 +215,7 @@ macro_rules! impl_client_trait {
                 data: &$crate::client::RerankData,
             ) -> Result<$crate::client::RerankOutput> {
                 let request_data = $prepare_rerank(self, data)?;
-                let builder = self.request_builder(client, request_data, ApiType::Rerank);
+                let builder = self.request_builder(client, request_data);
                 $rerank(builder, self.model()).await
             }
         }

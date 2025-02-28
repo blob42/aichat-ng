@@ -5,12 +5,17 @@ use crate::client::{Message, MessageContent, MessageRole};
 use crate::render::MarkdownRender;
 
 use anyhow::{bail, Context, Result};
+use fancy_regex::Regex;
 use inquire::{validator::Validation, Confirm, Text};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs::{read_to_string, write};
 use std::path::Path;
+
+lazy_static::lazy_static! {
+    static ref RE_AUTONAME_PREFIX: Regex = Regex::new(r"\d{8}T\d{6}-").unwrap();
+}
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Session {
@@ -27,18 +32,23 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     compress_threshold: Option<usize>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role_name: Option<String>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    agent_variables: AgentVariables,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    agent_instructions: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    compressed_messages: Vec<Message>,
     messages: Vec<Message>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     data_urls: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    compressed_messages: Vec<Message>,
 
     #[serde(skip)]
     model: Model,
     #[serde(skip)]
     role_prompt: String,
-    #[serde(skip)]
-    role_name: String,
     #[serde(skip)]
     name: String,
     #[serde(skip)]
@@ -46,7 +56,11 @@ pub struct Session {
     #[serde(skip)]
     dirty: bool,
     #[serde(skip)]
+    save_session_this_time: bool,
+    #[serde(skip)]
     compressing: bool,
+    #[serde(skip)]
+    autoname: Option<AutoName>,
 }
 
 impl Session {
@@ -68,14 +82,23 @@ impl Session {
         let mut session: Self =
             serde_yaml::from_str(&content).with_context(|| format!("Invalid session {}", name))?;
 
-        session.model = Model::retrieve_chat(config, &session.model_id)?;
-        session.name = name.to_string();
-        session.path = Some(path.display().to_string());
+        session.model = Model::retrieve_model(config, &session.model_id, ModelType::Chat)?;
 
-        if let Some(agent) = &config.agent {
-            session
-                .role_prompt
-                .clone_from(&agent.definition().instructions);
+        if let Some(autoname) = name.strip_prefix("_/") {
+            session.name = TEMP_SESSION_NAME.to_string();
+            session.path = None;
+            if let Ok(true) = RE_AUTONAME_PREFIX.is_match(autoname) {
+                session.autoname = Some(AutoName::new(autoname[16..].to_string()));
+            }
+        } else {
+            session.name = name.to_string();
+            session.path = Some(path.display().to_string());
+        }
+
+        if let Some(role_name) = &session.role_name {
+            if let Ok(role) = config.retrieve_role(role_name) {
+                session.role_prompt = role.prompt().to_string();
+            }
         }
 
         Ok(session)
@@ -89,25 +112,24 @@ impl Session {
         &self.name
     }
 
-    pub fn dirty(&self) -> bool {
-        self.dirty
+    pub fn role_name(&self) -> Option<&str> {
+        self.role_name.as_deref()
     }
 
-    pub fn compressing(&self) -> bool {
-        self.compressing
+    pub fn dirty(&self) -> bool {
+        self.dirty
     }
 
     pub fn save_session(&self) -> Option<bool> {
         self.save_session
     }
 
-    pub fn need_compress(&self, global_compress_threshold: usize) -> bool {
-        let threshold = self.compress_threshold.unwrap_or(global_compress_threshold);
-        threshold > 0 && self.tokens() > threshold
-    }
-
     pub fn tokens(&self) -> usize {
         self.model().total_tokens(&self.messages)
+    }
+
+    pub fn has_user_messages(&self) -> bool {
+        self.messages.iter().any(|v| v.role.is_user())
     }
 
     pub fn user_messages_len(&self) -> usize {
@@ -146,11 +168,19 @@ impl Session {
         Ok(output)
     }
 
-    pub fn render(&self, render: &mut MarkdownRender) -> Result<String> {
+    pub fn render(
+        &self,
+        render: &mut MarkdownRender,
+        agent_info: &Option<(String, Vec<String>)>,
+    ) -> Result<String> {
         let mut items = vec![];
 
         if let Some(path) = &self.path {
             items.push(("path", path.to_string()));
+        }
+
+        if let Some(autoname) = self.autoname() {
+            items.push(("autoname", autoname.to_string()));
         }
 
         items.push(("model", self.model().id()));
@@ -191,7 +221,10 @@ impl Session {
             for message in &self.messages {
                 match message.role {
                     MessageRole::System => {
-                        lines.push(render.render(&message.content.render_input(resolve_url_fn)));
+                        lines.push(
+                            render
+                                .render(&message.content.render_input(resolve_url_fn, agent_info)),
+                        );
                     }
                     MessageRole::Assistant => {
                         if let MessageContent::Text(text) = &message.content {
@@ -201,10 +234,12 @@ impl Session {
                     }
                     MessageRole::User => {
                         lines.push(format!(
-                            "{}）{}",
-                            self.name,
-                            message.content.render_input(resolve_url_fn)
+                            ">> {}",
+                            message.content.render_input(resolve_url_fn, agent_info)
                         ));
+                    }
+                    MessageRole::Tool => {
+                        lines.push(message.content.render_input(resolve_url_fn, agent_info));
                     }
                 }
             }
@@ -231,28 +266,40 @@ impl Session {
         self.top_p = role.top_p();
         self.use_tools = role.use_tools();
         self.model = role.model().clone();
-        self.role_name = role.name().to_string();
+        self.role_name = convert_option_string(role.name());
         self.role_prompt = role.prompt().to_string();
         self.dirty = true;
     }
 
-    pub fn update_role_prompt(&mut self, prompt: &str) {
-        self.role_prompt = prompt.to_string();
-    }
-
     pub fn clear_role(&mut self) {
-        self.role_name.clear();
+        self.role_name = None;
         self.role_prompt.clear();
     }
 
+    pub fn sync_agent(&mut self, agent: &Agent) {
+        self.role_name = None;
+        self.role_prompt = agent.interpolated_instructions();
+        self.agent_variables = agent.variables().clone();
+        self.agent_instructions = self.role_prompt.clone();
+    }
+
+    pub fn agent_variables(&self) -> &AgentVariables {
+        &self.agent_variables
+    }
+
+    pub fn agent_instructions(&self) -> &str {
+        &self.agent_instructions
+    }
+
     pub fn set_save_session(&mut self, value: Option<bool>) {
-        if self.name == TEMP_SESSION_NAME {
-            return;
-        }
         if self.save_session != value {
             self.save_session = value;
             self.dirty = true;
         }
+    }
+
+    pub fn set_save_session_this_time(&mut self) {
+        self.save_session_this_time = true;
     }
 
     pub fn set_compress_threshold(&mut self, value: Option<usize>) {
@@ -260,6 +307,21 @@ impl Session {
             self.compress_threshold = value;
             self.dirty = true;
         }
+    }
+
+    pub fn need_compress(&self, global_compress_threshold: usize) -> bool {
+        if self.compressing {
+            return false;
+        }
+        let threshold = self.compress_threshold.unwrap_or(global_compress_threshold);
+        if threshold < 1 {
+            return false;
+        }
+        self.tokens() > threshold
+    }
+
+    pub fn compressing(&self) -> bool {
+        self.compressing
     }
 
     pub fn set_compressing(&mut self, compressing: bool) {
@@ -286,9 +348,39 @@ impl Session {
         self.dirty = true;
     }
 
+    pub fn need_autoname(&self) -> bool {
+        self.autoname.as_ref().map(|v| v.need()).unwrap_or_default()
+    }
+
+    pub fn set_autonaming(&mut self, naming: bool) {
+        if let Some(v) = self.autoname.as_mut() {
+            v.naming = naming;
+        }
+    }
+
+    pub fn chat_history_for_autonaming(&self) -> Option<String> {
+        self.autoname.as_ref().and_then(|v| v.chat_history.clone())
+    }
+
+    pub fn autoname(&self) -> Option<&str> {
+        self.autoname.as_ref().and_then(|v| v.name.as_deref())
+    }
+
+    pub fn set_autoname(&mut self, value: &str) {
+        let name = value
+            .chars()
+            .map(|v| if v.is_alphanumeric() { v } else { '-' })
+            .collect();
+        self.autoname = Some(AutoName::new(name));
+    }
+
     pub fn exit(&mut self, session_dir: &Path, is_repl: bool) -> Result<()> {
-        let save_session = self.save_session();
+        let mut save_session = self.save_session();
+        if self.save_session_this_time {
+            save_session = Some(true);
+        }
         if self.dirty && save_session != Some(false) {
+            let mut session_dir = session_dir.to_path_buf();
             let mut session_name = self.name().to_string();
             if save_session.is_none() {
                 if !is_repl {
@@ -313,9 +405,16 @@ impl Session {
                         .prompt()?;
                 }
             } else if save_session == Some(true) && session_name == TEMP_SESSION_NAME {
+                session_dir = session_dir.join("_");
+                ensure_parent_exists(&session_dir).with_context(|| {
+                    format!("Failed to create directory '{}'", session_dir.display())
+                })?;
+
                 let now = chrono::Local::now();
-                let formatted_time = now.format("%Y%m%dT%H:%M:%S").to_string();
-                session_name = format!("{TEMP_SESSION_NAME}-{formatted_time}");
+                session_name = now.format("%Y%m%dT%H%M%S").to_string();
+                if let Some(autoname) = self.autoname() {
+                    session_name = format!("{session_name}-{autoname}")
+                }
             }
             let session_path = session_dir.join(format!("{session_name}.yaml"));
             self.save(&session_name, &session_path, is_repl)?;
@@ -339,7 +438,7 @@ impl Session {
         })?;
 
         if is_repl {
-            println!("✨ Saved session to '{}'", session_path.display());
+            println!("✓ Saved the session to '{}'.", session_path.display());
         }
 
         if self.name() != session_name {
@@ -353,7 +452,7 @@ impl Session {
 
     pub fn guard_empty(&self) -> Result<()> {
         if !self.is_empty() {
-            bail!("This action cannot be performed in a session with messages.")
+            bail!("Cannot perform this operation because the session has messages, please `.empty session` first.");
         }
         Ok(())
     }
@@ -379,16 +478,24 @@ impl Session {
                 }
             }
         } else {
-            let mut need_add_msg = true;
             if self.messages.is_empty() {
+                if self.name == TEMP_SESSION_NAME && self.save_session == Some(true) {
+                    let raw_input = input.raw();
+                    let chat_history = format!("USER: {raw_input}\nASSISTANT: {output}\n");
+                    self.autoname = Some(AutoName::new_from_chat_history(chat_history));
+                }
                 self.messages.extend(input.role().build_messages(input));
-                need_add_msg = false;
-            }
-            if need_add_msg {
+            } else {
                 self.messages
                     .push(Message::new(MessageRole::User, input.message_content()));
             }
             self.data_urls.extend(input.data_urls());
+            if let Some(tool_calls) = input.tool_calls() {
+                self.messages.push(Message::new(
+                    MessageRole::Tool,
+                    MessageContent::ToolCalls(tool_calls.clone()),
+                ))
+            }
             self.messages.push(Message::new(
                 MessageRole::Assistant,
                 MessageContent::Text(output.to_string()),
@@ -402,6 +509,7 @@ impl Session {
         self.messages.clear();
         self.compressed_messages.clear();
         self.data_urls.clear();
+        self.autoname = None;
         self.dirty = true;
     }
 
@@ -452,7 +560,8 @@ impl Session {
 
 impl RoleLike for Session {
     fn to_role(&self) -> Role {
-        let mut role = Role::new(&self.role_name, &self.role_prompt);
+        let role_name = self.role_name.as_deref().unwrap_or_default();
+        let mut role = Role::new(role_name, &self.role_prompt);
         role.sync(self);
         role
     }
@@ -504,5 +613,30 @@ impl RoleLike for Session {
             self.use_tools = value;
             self.dirty = true;
         }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct AutoName {
+    naming: bool,
+    chat_history: Option<String>,
+    name: Option<String>,
+}
+
+impl AutoName {
+    pub fn new(name: String) -> Self {
+        Self {
+            name: Some(name),
+            ..Default::default()
+        }
+    }
+    pub fn new_from_chat_history(chat_history: String) -> Self {
+        Self {
+            chat_history: Some(chat_history),
+            ..Default::default()
+        }
+    }
+    pub fn need(&self) -> bool {
+        !self.naming && self.chat_history.is_some() && self.name.is_none()
     }
 }

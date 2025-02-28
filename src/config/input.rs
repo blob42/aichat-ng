@@ -1,22 +1,19 @@
 use super::*;
 
 use crate::client::{
-    init_client, ChatCompletionsData, Client, ImageUrl, Message, MessageContent,
-    MessageContentPart, MessageRole, Model,
+    init_client, patch_messages, ChatCompletionsData, Client, ImageUrl, Message, MessageContent,
+    MessageContentPart, MessageContentToolCalls, MessageRole, Model,
 };
-use crate::function::{ToolResult, ToolResults};
-use crate::utils::{base64_encode, sha256, AbortSignal};
+use crate::function::ToolResult;
+use crate::utils::{base64_encode, is_loader_protocol, sha256, AbortSignal};
 
 use anyhow::{bail, Context, Result};
-use fancy_regex::Regex;
-use std::{collections::HashMap, fs::File, io::Read, path::Path};
+use indexmap::IndexSet;
+use std::{collections::HashMap, fs::File, io::Read};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const IMAGE_EXTS: [&str; 5] = ["png", "jpeg", "jpg", "webp", "gif"];
-
-lazy_static::lazy_static! {
-    static ref URL_RE: Regex = Regex::new(r"^[A-Za-z0-9_-]{2,}:/").unwrap();
-}
+const SUMMARY_MAX_WIDTH: usize = 80;
 
 #[derive(Debug, Clone)]
 pub enum Regenerate {
@@ -31,14 +28,16 @@ pub enum Regenerate {
 pub struct Input {
     config: GlobalConfig,
     text: String,
+    raw: (String, Vec<String>),
     patched_text: Option<String>,
+    last_reply: Option<String>,
     continue_output: Option<String>,
     regenerate: Option<Regenerate>,
     medias: Vec<String>,
     data_urls: HashMap<String, String>,
-    tool_call: Option<ToolResults>,
-    rag_name: Option<String>,
+    tool_calls: Option<MessageContentToolCalls>,
     role: Role,
+    rag_name: Option<String>,
     with_session: bool,
     with_agent: bool,
 }
@@ -49,14 +48,16 @@ impl Input {
         Self {
             config: config.clone(),
             text: text.to_string(),
+            raw: (text.to_string(), vec![]),
             patched_text: None,
+            last_reply: None,
             continue_output: None,
             regenerate: None,
             medias: Default::default(),
             data_urls: Default::default(),
-            tool_call: None,
-            rag_name: None,
+            tool_calls: None,
             role,
+            rag_name: None,
             with_session,
             with_agent,
         }
@@ -64,40 +65,84 @@ impl Input {
 
     pub async fn from_files(
         config: &GlobalConfig,
-        text: &str,
+        raw_text: &str,
         paths: Vec<String>,
         role: Option<Role>,
     ) -> Result<Self> {
+        let loaders = config.read().document_loaders.clone();
+        let (raw_paths, local_paths, remote_urls, external_cmds, protocol_paths, with_last_reply) =
+            resolve_paths(&loaders, paths)?;
+        let mut last_reply = None;
+        let (documents, medias, data_urls) = load_documents(
+            &loaders,
+            local_paths,
+            remote_urls,
+            external_cmds,
+            protocol_paths,
+        )
+        .await
+        .context("Failed to load files")?;
         let mut texts = vec![];
-        if !text.is_empty() {
-            texts.push(text.to_string());
+        if !raw_text.is_empty() {
+            texts.push(raw_text.to_string());
         };
-        let spinner = create_spinner("Loading files").await;
-        let ret = load_paths(config, paths).await;
-        spinner.stop();
-        let (files, medias, data_urls) = ret?;
-        let files_len = files.len();
-        if files_len > 0 {
-            texts.push(String::new());
+        if with_last_reply {
+            if let Some(LastMessage { input, output, .. }) = config.read().last_message.as_ref() {
+                if !output.is_empty() {
+                    last_reply = Some(output.clone())
+                } else if let Some(v) = input.last_reply.as_ref() {
+                    last_reply = Some(v.clone());
+                }
+                if let Some(v) = last_reply.clone() {
+                    texts.push(format!("\n{v}"));
+                }
+            }
+            if last_reply.is_none() && documents.is_empty() && medias.is_empty() {
+                bail!("No last reply found");
+            }
         }
-        for (path, contents) in files {
-            texts.push(format!("`{path}`:\n\n{contents}\n"));
+        let documents_len = documents.len();
+        for (kind, path, contents) in documents {
+            if documents_len == 1 {
+                texts.push(format!("\n{contents}"));
+            } else {
+                texts.push(format!(
+                    "\n============ {kind}: {path} ============\n{contents}"
+                ));
+            }
         }
         let (role, with_session, with_agent) = resolve_role(&config.read(), role);
         Ok(Self {
             config: config.clone(),
             text: texts.join("\n"),
+            raw: (raw_text.to_string(), raw_paths),
             patched_text: None,
+            last_reply,
             continue_output: None,
             regenerate: None,
             medias,
             data_urls,
-            tool_call: Default::default(),
-            rag_name: None,
+            tool_calls: Default::default(),
             role,
+            rag_name: None,
             with_session,
             with_agent,
         })
+    }
+
+    pub async fn from_files_with_spinner(
+        config: &GlobalConfig,
+        raw_text: &str,
+        paths: Vec<String>,
+        role: Option<Role>,
+        abort_signal: AbortSignal,
+    ) -> Result<Self> {
+        abortable_run_with_spinner(
+            Input::from_files(config, raw_text, paths, role),
+            "Loading files",
+            abort_signal,
+        )
+        .await
     }
 
     pub fn is_empty(&self) -> bool {
@@ -106,6 +151,10 @@ impl Input {
 
     pub fn data_urls(&self) -> HashMap<String, String> {
         self.data_urls.clone()
+    }
+
+    pub fn tool_calls(&self) -> &Option<MessageContentToolCalls> {
+        &self.tool_calls
     }
 
     pub fn text(&self) -> String {
@@ -121,6 +170,10 @@ impl Input {
 
     pub fn set_text(&mut self, text: String) {
         self.text = text;
+    }
+
+    pub fn stream(&self) -> bool {
+        self.config.read().stream && !self.role().model().no_stream()
     }
 
     pub fn continue_output(&self) -> Option<&str> {
@@ -171,13 +224,12 @@ impl Input {
         self.rag_name.as_deref()
     }
 
-    pub fn merge_tool_call(mut self, output: String, tool_results: Vec<ToolResult>) -> Self {
-        match self.tool_call.as_mut() {
+    pub fn merge_tool_results(mut self, output: String, tool_results: Vec<ToolResult>) -> Self {
+        match self.tool_calls.as_mut() {
             Some(exist_tool_results) => {
-                exist_tool_results.0.extend(tool_results);
-                exist_tool_results.1 = output;
+                exist_tool_results.merge(tool_results, output);
             }
-            None => self.tool_call = Some((tool_results, output)),
+            None => self.tool_calls = Some(MessageContentToolCalls::new(tool_results, output)),
         }
         self
     }
@@ -186,18 +238,22 @@ impl Input {
         init_client(&self.config, Some(self.role().model().clone()))
     }
 
+    pub async fn fetch_chat_text(&self) -> Result<String> {
+        let client = self.create_client()?;
+        let text = client.chat_completions(self.clone()).await?.text;
+        let text = strip_think_tag(&text).to_string();
+        Ok(text)
+    }
+
     pub fn prepare_completion_data(
         &self,
         model: &Model,
         stream: bool,
     ) -> Result<ChatCompletionsData> {
-        if !self.medias.is_empty() && !model.supports_vision() {
-            bail!("The current model does not support vision. Is the model configured with `supports_vision: true`?");
-        }
-        let messages = self.build_messages()?;
+        let mut messages = self.build_messages()?;
+        patch_messages(&mut messages, model);
         model.guard_max_input_tokens(&messages)?;
-        let temperature = self.role().temperature();
-        let top_p = self.role().top_p();
+        let (temperature, top_p) = (self.role().temperature(), self.role().top_p());
         let functions = self.config.read().select_functions(self.role());
         Ok(ChatCompletionsData {
             messages,
@@ -214,10 +270,10 @@ impl Input {
         } else {
             self.role().build_messages(self)
         };
-        if let Some(tool_results) = &self.tool_call {
+        if let Some(tool_calls) = &self.tool_calls {
             messages.push(Message::new(
                 MessageRole::Assistant,
-                MessageContent::ToolResults(tool_results.clone()),
+                MessageContent::ToolCalls(tool_calls.clone()),
             ))
         }
         Ok(messages)
@@ -262,12 +318,12 @@ impl Input {
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect();
-        if text.width_cjk() > 70 {
+        if text.width_cjk() > SUMMARY_MAX_WIDTH {
             let mut sum_width = 0;
             let mut chars = vec![];
             for c in text.chars() {
                 sum_width += c.width_cjk().unwrap_or(1);
-                if sum_width > 67 {
+                if sum_width > SUMMARY_MAX_WIDTH - 3 {
                     chars.extend(['.', '.', '.']);
                     break;
                 }
@@ -277,6 +333,21 @@ impl Input {
         } else {
             text
         }
+    }
+
+    pub fn raw(&self) -> String {
+        let (text, files) = &self.raw;
+        let mut segments = files.to_vec();
+        if !segments.is_empty() {
+            segments.insert(0, ".file".into());
+        }
+        if !text.is_empty() {
+            if !segments.is_empty() {
+                segments.push("--".into());
+            }
+            segments.push(text.clone());
+        }
+        segments.join(" ")
     }
 
     pub fn render(&self) -> String {
@@ -329,46 +400,121 @@ fn resolve_role(config: &Config, role: Option<Role>) -> (Role, bool, bool) {
     }
 }
 
-async fn load_paths(
-    config: &GlobalConfig,
+type ResolvePathsOutput = (
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    bool,
+);
+
+fn resolve_paths(
+    loaders: &HashMap<String, String>,
     paths: Vec<String>,
-) -> Result<(Vec<(String, String)>, Vec<String>, HashMap<String, String>)> {
+) -> Result<ResolvePathsOutput> {
+    let mut raw_paths = IndexSet::new();
+    let mut local_paths = IndexSet::new();
+    let mut remote_urls = IndexSet::new();
+    let mut external_cmds = IndexSet::new();
+    let mut protocol_paths = IndexSet::new();
+    let mut with_last_reply = false;
+    for path in paths {
+        if path == "%%" {
+            with_last_reply = true;
+            raw_paths.insert(path);
+        } else if path.starts_with('`') && path.len() > 2 && path.ends_with('`') {
+            external_cmds.insert(path[1..path.len() - 1].to_string());
+            raw_paths.insert(path);
+        } else if is_url(&path) {
+            if path.strip_suffix("**").is_some() {
+                bail!("Invalid website '{path}'");
+            }
+            remote_urls.insert(path.clone());
+            raw_paths.insert(path);
+        } else if is_loader_protocol(loaders, &path) {
+            protocol_paths.insert(path.clone());
+            raw_paths.insert(path);
+        } else {
+            let resolved_path = resolve_home_dir(&path);
+            let absolute_path = to_absolute_path(&resolved_path)
+                .with_context(|| format!("Invalid path '{path}'"))?;
+            local_paths.insert(resolved_path);
+            raw_paths.insert(absolute_path);
+        }
+    }
+    Ok((
+        raw_paths.into_iter().collect(),
+        local_paths.into_iter().collect(),
+        remote_urls.into_iter().collect(),
+        external_cmds.into_iter().collect(),
+        protocol_paths.into_iter().collect(),
+        with_last_reply,
+    ))
+}
+
+async fn load_documents(
+    loaders: &HashMap<String, String>,
+    local_paths: Vec<String>,
+    remote_urls: Vec<String>,
+    external_cmds: Vec<String>,
+    protocol_paths: Vec<String>,
+) -> Result<(
+    Vec<(&'static str, String, String)>,
+    Vec<String>,
+    HashMap<String, String>,
+)> {
     let mut files = vec![];
     let mut medias = vec![];
     let mut data_urls = HashMap::new();
-    let loaders = config.read().document_loaders.clone();
-    let mut local_paths = vec![];
-    let mut remote_urls = vec![];
-    for path in paths {
-        match resolve_local_path(&path) {
-            Some(v) => local_paths.push(v),
-            None => remote_urls.push(path),
+
+    for cmd in external_cmds {
+        let (success, stdout, stderr) =
+            run_command_with_output(&SHELL.cmd, &[&SHELL.arg, &cmd], None)?;
+        if !success {
+            let err = if !stderr.is_empty() { stderr } else { stdout };
+            bail!("Failed to run `{cmd}`\n{err}");
         }
+        files.push(("CMD", cmd, stdout));
     }
-    let local_files = expand_glob_paths(&local_paths).await?;
+
+    let local_files = expand_glob_paths(&local_paths, true).await?;
     for file_path in local_files {
         if is_image(&file_path) {
-            let data_url = read_media_to_data_url(&file_path)
-                .with_context(|| format!("Unable to read media file '{file_path}'"))?;
-            data_urls.insert(sha256(&data_url), file_path);
-            medias.push(data_url)
+            let contents = read_media_to_data_url(&file_path)
+                .with_context(|| format!("Unable to read media '{file_path}'"))?;
+            data_urls.insert(sha256(&contents), file_path);
+            medias.push(contents)
         } else {
-            let text = read_file(&file_path)
+            let document = load_file(loaders, &file_path)
+                .await
                 .with_context(|| format!("Unable to read file '{file_path}'"))?;
-            files.push((file_path, text));
+            files.push(("FILE", file_path, document.contents));
         }
     }
+
     for file_url in remote_urls {
-        let (contents, extension) = fetch(&loaders, &file_url, true)
+        let (contents, extension) = fetch_with_loaders(loaders, &file_url, true)
             .await
             .with_context(|| format!("Failed to load url '{file_url}'"))?;
         if extension == MEDIA_URL_EXTENSION {
             data_urls.insert(sha256(&contents), file_url);
             medias.push(contents)
         } else {
-            files.push((file_url, contents));
+            files.push(("URL", file_url, contents));
         }
     }
+
+    for protocol_path in protocol_paths {
+        let documents = load_protocol_path(loaders, &protocol_path)
+            .with_context(|| format!("Failed to load from '{protocol_path}'"))?;
+        files.extend(
+            documents
+                .into_iter()
+                .map(|document| ("FROM", document.path, document.contents)),
+        );
+    }
+
     Ok((files, medias, data_urls))
 }
 
@@ -382,18 +528,6 @@ pub fn resolve_data_url(data_urls: &HashMap<String, String>, data_url: String) -
     } else {
         data_url
     }
-}
-
-fn resolve_local_path(path: &str) -> Option<String> {
-    if let Ok(true) = URL_RE.is_match(path) {
-        return None;
-    }
-    let new_path = if let (Some(file), Some(home)) = (path.strip_prefix("~/"), dirs::home_dir()) {
-        home.join(file).display().to_string()
-    } else {
-        path.to_string()
-    };
-    Some(new_path)
 }
 
 fn is_image(path: &str) -> bool {
@@ -419,13 +553,4 @@ fn read_media_to_data_url(image_path: &str) -> Result<String> {
     let data_url = format!("data:{};base64,{}", mime_type, encoded_image);
 
     Ok(data_url)
-}
-
-fn read_file<P: AsRef<Path>>(file_path: P) -> Result<String> {
-    let file_path = file_path.as_ref();
-
-    let mut text = String::new();
-    let mut file = File::open(file_path)?;
-    file.read_to_string(&mut text)?;
-    Ok(text)
 }

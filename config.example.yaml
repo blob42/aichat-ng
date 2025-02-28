@@ -1,7 +1,7 @@
 # ---- llm ----
 model: openai:gpt-4o             # Specify the LLM to use
-temperature: null                # Set default temperature parameter
-top_p: null                      # Set default top-p parameter, range (0, 1)
+temperature: null                # Set default temperature parameter (0, 1)
+top_p: null                      # Set default top-p parameter, with a range of (0, 1) or (0, 2) depending on the model
 
 # ---- behavior ----
 stream: true                     # Controls whether to use the stream-style API.
@@ -19,9 +19,9 @@ mapping_tools:                   # Alias for a tool or toolset
 use_tools: null                  # Which tools to use by default. (e.g. 'fs,web_search')
 
 # ---- prelude ----
-prelude: null                    # Set a default role or session to start with (e.g. role:<name>, session:<name>)
-repl_prelude: null               # Overrides the `prelude` setting specifically for conversations started in REPL
-agent_prelude: null              # Set a session to use when starting a agent. (e.g. temp, default)
+repl_prelude: null               # Set a default role or session for REPL mode (e.g. role:<name>, session:<name>, <session>:<role>)
+cmd_prelude: null                # Set a default role or session for CMD mode (e.g. role:<name>, session:<name>, <session>:<role>)
+agent_prelude: null              # Set a session to use when starting a agent (e.g. temp, default)
 
 # ---- session ----
 # Controls the persistence of the session. if true, auto save; if false, not save; if null, asking the user
@@ -35,28 +35,32 @@ summary_prompt: 'This is a summary of the chat history as a recap: '
 
 # ---- RAG ----
 # See [RAG-Guide](https://github.com/sigoden/aichat/wiki/RAG-Guide) for more details.
-rag_embedding_model: null                   # Specifies the embedding model to use
-rag_reranker_model: null                    # Specifies the rerank model to use
-rag_top_k: 4                                # Specifies the number of documents to retrieve
-rag_chunk_size: null                        # Specifies the chunk size
-rag_chunk_overlap: null                     # Specifies the chunk overlap
-rag_min_score_vector_search: 0              # Specifies the minimum relevance score for vector-based searching
-rag_min_score_keyword_search: 0             # Specifies the minimum relevance score for keyword-based searching
+rag_embedding_model: null        # Specifies the embedding model used for context retrieval
+rag_reranker_model: null         # Specifies the reranker model used for sorting retrieved documents
+rag_top_k: 5                     # Specifies the number of documents to retrieve for answering queries
+rag_chunk_size: null             # Defines the size of chunks for document processing in characters
+rag_chunk_overlap: null          # Defines the overlap between chunks
 # Defines the query structure using variables like __CONTEXT__ and __INPUT__ to tailor searches to specific needs
 rag_template: |
-  Use the following context as your learned knowledge, inside <context></context> XML tags.
+  Answer the query based on the context while respecting the rules. (user query, some textual context and rules, all inside xml tags)
+
   <context>
   __CONTEXT__
   </context>
 
-  When answer to user:
-  - If you don't know, just say that you don't know.
-  - If you don't know when you are not sure, ask for clarification.
-  Avoid mentioning that you obtained the information from the context.
-  And answer according to the language of the user's question.
+  <rules>
+  - If you don't know, just say so.
+  - If you are not sure, ask for clarification.
+  - Answer in the same language as the user query.
+  - If the context appears unreadable or of poor quality, tell the user then answer as best as you can.
+  - If the answer is not in the context but you think you know the answer, explain that to the user then answer with your own knowledge.
+  - Answer directly and without using xml tags.
+  </rules>
 
-  Given the context information, answer the query.
-  Query: __INPUT__
+  <user_query>
+  __INPUT__
+  </user_query>
+
 # Define document loaders to control how RAG and `.file`/`--file` load files of specific formats.
 document_loaders:
   # You can add custom loaders using the following syntax:
@@ -76,7 +80,11 @@ right_prompt:
   '{color.purple}{?session {?consume_tokens {consume_tokens}({consume_percent}%)}{!consume_tokens {consume_tokens}}}{color.reset}'
 
 # ---- misc ----
-serve_addr: 127.0.0.1:8000                  # Default serve listening address 
+serve_addr: 127.0.0.1:8000                  # Server listening address 
+user_agent: null                            # Set User-Agent HTTP header, use `auto` for aichat/<current-version>
+save_shell_history: true                    # Whether to save shell execution command to the history file
+# URL to sync model changes from, e.g., https://cdn.jsdelivr.net/gh/sigoden/aichat@main/models.yaml
+sync_models_url: https://raw.githubusercontent.com/sigoden/aichat/refs/heads/main/models.yaml
 
 # ---- clients ----
 clients:
@@ -90,13 +98,10 @@ clients:
   #       supports_function_calling: true
   #     - name: xxxx                                  # Embedding model
   #       type: embedding
-  #       max_input_tokens: 200000
-  #       max_tokens_per_chunk: 2000
   #       default_chunk_size: 1500                        
   #       max_batch_size: 100
   #     - name: xxxx                                  # Reranker model
   #       type: reranker 
-  #       max_input_tokens: 2048
   #   patch:                                          # Patch api
   #     chat_completions:                             # Api type, possible values: chat_completions, embeddings, and rerank
   #       <regex>:                                    # The regex to match model names, e.g. '.*' 'gpt-4o' 'gpt-4o|gpt-4-.*'
@@ -117,19 +122,22 @@ clients:
 
   # For any platform compatible with OpenAI's API
   - type: openai-compatible
-    name: local
-    api_base: http://localhost:8080/v1
+    name: ollama
+    api_base: http://localhost:11434/v1
     api_key: xxx                                      # Optional
     models:
+      - name: deepseek-r1
+        max_input_tokens: 131072
       - name: llama3.1
         max_input_tokens: 128000
         supports_function_calling: true
-      - name: jina-embeddings-v2-base-en
+      - name: llama3.2-vision
+        max_input_tokens: 131072
+        supports_vision: true
+      - name: nomic-embed-text
         type: embedding
-        default_chunk_size: 1500
-        max_batch_size: 100
-      - name: jina-reranker-v2-base-multilingual
-        type: reranker
+        default_chunk_size: 1000
+        max_batch_size: 50
 
   # See https://ai.google.dev/docs
   - type: gemini
@@ -160,6 +168,12 @@ clients:
     api_base: https://api.mistral.ai/v1
     api_key: xxx
 
+  # See https://docs.x.ai/docs
+  - type: openai-compatible
+    name: xai
+    api_base: https://api.x.ai/v1
+    api_key: xxx
+
   # See https://docs.ai21.com/docs/quickstart
   - type: openai-compatible
     name: ai12
@@ -168,7 +182,7 @@ clients:
 
   # See https://docs.cohere.com/docs/the-cohere-platform
   - type: cohere
-    api_base: https://api.cohere.ai/v1                # Optional
+    api_base: https://api.cohere.ai/v2                # Optional
     api_key: xxx
 
   # See https://docs.perplexity.ai/docs/getting-started
@@ -182,11 +196,6 @@ clients:
     name: groq
     api_base: https://api.groq.com/openai/v1
     api_key: xxx
-
-  # See https://github.com/jmorganca/ollama
-  - type: openai-compatible
-    name: ollama
-    api_base: http://localhost:11434/v1
 
   # See https://learn.microsoft.com/en-us/azure/ai-services/openai/chatgpt-quickstart
   - type: azure-openai
@@ -202,10 +211,10 @@ clients:
   - type: vertexai
     project_id: xxx
     location: xxx
-    # Specifies a application-default-credentials (adc) file, Optional field
+    # Specifies a application-default-credentials (adc) file
     # Run `gcloud auth application-default login` to init the adc file
     # see https://cloud.google.com/docs/authentication/external/set-up-adc
-    adc_file: <path-to/gcloud/application_default_credentials.json> 
+    adc_file: <gcloud-config-dir>/application_default_credentials.json>  # Optional field
     patch:
       chat_completions:
         'gemini-.*':
@@ -232,21 +241,22 @@ clients:
     api_base: https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1
     api_key: xxx
 
-  # See https://huggingface.co/inference-api/serverless
-  - type: openai-compatible
-    name: huggingface
-    api_base: https://api-inference.huggingface.co/v1
-    api_key: xxx
-
   # See https://cloud.baidu.com/doc/WENXINWORKSHOP/index.html
-  - type: ernie
+  - type: openai-compatible
+    name: ernie
+    api_base: https://qianfan.baidubce.com/v2
     api_key: xxx
-    secret_key: xxx
 
-  # See https://help.aliyun.com/zh/dashscope/
+  # See https://dashscope.aliyun.com/
   - type: openai-compatible
     name: qianwen
     api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: xxx
+
+  # See https://cloud.tencent.com/product/hunyuan
+  - type: openai-compatible
+    name: hunyuan
+    api_base: https://api.hunyuan.cloud.tencent.com/v1
     api_key: xxx
 
   # See https://platform.moonshot.cn/docs/intro
@@ -273,22 +283,10 @@ clients:
     api_base: https://api.lingyiwanwu.com/v1
     api_key: xxx
 
-  # See https://deepinfra.com/docs
+  # See https://platform.minimaxi.com/document/Fast%20access
   - type: openai-compatible
-    name: deepinfra
-    api_base: https://api.deepinfra.com/v1/openai
-    api_key: xxx
-
-  # See https://github.com/marketplace/models
-  - type: openai-compatible
-    name: github
-    api_base: https://models.inference.ai.azure.com
-    api_key: xxx
-
-  # See https://readme.fireworks.ai/docs/quickstart
-  - type: openai-compatible
-    name: fireworks
-    api_base: https://api.fireworks.ai/inference/v1
+    name: minimax
+    api_base: https://api.minimax.chat/v1
     api_key: xxx
 
   # See https://openrouter.ai/docs#quick-start
@@ -297,17 +295,18 @@ clients:
     api_base: https://openrouter.ai/api/v1
     api_key: xxx
 
-  # See https://docs.siliconflow.cn/docs/getting-started
+  # See https://github.com/marketplace/models
   - type: openai-compatible
-    name: siliconflow
-    api_base: https://api.siliconflow.cn/v1
+    name: github
+    api_base: https://models.inference.ai.azure.com
     api_key: xxx
 
-  # See https://docs.together.ai/docs/quickstart
+  # See https://deepinfra.com/docs
   - type: openai-compatible
-    name: together
-    api_base: https://api.together.xyz/v1
+    name: deepinfra
+    api_base: https://api.deepinfra.com/v1/openai
     api_key: xxx
+
 
   # ----- RAG dedicated -----
 

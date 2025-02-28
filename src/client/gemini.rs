@@ -23,8 +23,7 @@ impl GeminiClient {
     config_get_fn!(api_key, get_api_key);
     config_get_fn!(api_base, get_api_base);
 
-    pub const PROMPTS: [PromptAction<'static>; 1] =
-        [("api_key", "API Key:", true, PromptKind::String)];
+    pub const PROMPTS: [PromptAction<'static>; 1] = [("api_key", "API Key", None)];
 }
 
 impl_client_trait!(
@@ -55,7 +54,7 @@ fn prepare_chat_completions(
     let url = format!(
         "{}/models/{}:{}?key={}",
         api_base.trim_end_matches('/'),
-        self_.model.name(),
+        self_.model.real_name(),
         func,
         api_key
     );
@@ -76,11 +75,11 @@ fn prepare_embeddings(self_: &GeminiClient, data: &EmbeddingsData) -> Result<Req
     let url = format!(
         "{}/models/{}:batchEmbedContents?key={}",
         api_base.trim_end_matches('/'),
-        self_.model.name(),
+        self_.model.real_name(),
         api_key
     );
 
-    let model_id = format!("models/{}", self_.model.name());
+    let model_id = format!("models/{}", self_.model.real_name());
 
     let requests: Vec<_> = data
         .texts

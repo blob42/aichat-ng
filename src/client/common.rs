@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::{
-    config::{GlobalConfig, Input},
+    config::{Config, GlobalConfig, Input},
     function::{eval_tool_calls, FunctionDeclaration, ToolCall, ToolResult},
     render::render_stream,
     utils::*,
@@ -10,16 +10,22 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use fancy_regex::Regex;
 use indexmap::IndexMap;
+use inquire::{
+    list_option::ListOption, required, validator::Validation, MultiSelect, Select, Text,
+};
 use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
 
 const MODELS_YAML: &str = include_str!("../../models.yaml");
 
 lazy_static::lazy_static! {
-    pub static ref ALL_MODELS: Vec<BuiltinModels> = serde_yaml::from_str(MODELS_YAML).unwrap();
+    pub static ref ALL_PROVIDER_MODELS: Vec<ProviderModels> = {
+        Config::loal_models_override().ok().unwrap_or_else(|| serde_yaml::from_str(MODELS_YAML).unwrap())
+    };
+    static ref EMBEDDING_MODEL_RE: Regex = Regex::new(r"((^|/)(bge-|e5-|uae-|gte-|text-)|embed|multilingual|minilm)").unwrap();
     static ref ESCAPE_SLASH_RE: Regex = Regex::new(r"(?<!\\)/").unwrap();
 }
 
@@ -41,8 +47,12 @@ pub trait Client: Sync + Send {
         let mut builder = ReqwestClient::builder();
         let extra = self.extra_config();
         let timeout = extra.and_then(|v| v.connect_timeout).unwrap_or(10);
-        let proxy = extra.and_then(|v| v.proxy.clone());
-        builder = set_proxy(builder, proxy.as_ref())?;
+        if let Some(proxy) = extra.and_then(|v| v.proxy.as_deref()) {
+            builder = set_proxy(builder, proxy)?;
+        }
+        if let Some(user_agent) = self.global_config().read().user_agent.as_ref() {
+            builder = builder.user_agent(user_agent);
+        }
         let client = builder
             .connect_timeout(Duration::from_secs(timeout))
             .build()
@@ -67,17 +77,13 @@ pub trait Client: Sync + Send {
         input: &Input,
         handler: &mut SseHandler,
     ) -> Result<()> {
-        let abort_signal = handler.get_abort();
+        let abort_signal = handler.abort();
         let input = input.clone();
         tokio::select! {
             ret = async {
                 if self.global_config().read().dry_run {
                     let content = input.echo_messages();
-                    let tokens = split_content(&content);
-                    for token in tokens {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                        handler.text(token)?;
-                    }
+                    handler.text(&content)?;
                     return Ok(());
                 }
                 let client = self.build_client()?;
@@ -87,7 +93,7 @@ pub trait Client: Sync + Send {
                 handler.done();
                 ret.with_context(|| "Failed to call chat-completions api")
             }
-            _ = watch_abort_signal(abort_signal) => {
+            _ = wait_abort_signal(&abort_signal) => {
                 handler.done();
                 Ok(())
             },
@@ -141,30 +147,34 @@ pub trait Client: Sync + Send {
         &self,
         client: &reqwest::Client,
         mut request_data: RequestData,
-        api_type: ApiType,
     ) -> RequestBuilder {
-        self.patch_request_data(&mut request_data, api_type);
+        self.patch_request_data(&mut request_data);
         request_data.into_builder(client)
     }
 
-    fn patch_request_data(&self, request_data: &mut RequestData, api_type: ApiType) {
-        let map = std::env::var(get_env_name(&format!(
+    fn patch_request_data(&self, request_data: &mut RequestData) {
+        let model_type = self.model().model_type();
+        if let Some(patch) = self.model().patch() {
+            request_data.apply_patch(patch.clone());
+        }
+
+        let patch_map = std::env::var(get_env_name(&format!(
             "patch_{}_{}",
             self.model().client_name(),
-            api_type.name(),
+            model_type.api_name(),
         )))
         .ok()
         .and_then(|v| serde_json::from_str(&v).ok())
         .or_else(|| {
             self.patch_config()
-                .and_then(|v| api_type.extract_patch(v))
+                .and_then(|v| model_type.extract_patch(v))
                 .cloned()
         });
-        let map = match map {
+        let patch_map = match patch_map {
             Some(v) => v,
             _ => return,
         };
-        for (key, patch) in map {
+        for (key, patch) in patch_map {
             let key = ESCAPE_SLASH_RE.replace_all(&key, r"\/");
             if let Ok(regex) = Regex::new(&format!("^({key})$")) {
                 if let Ok(true) = regex.is_match(self.model().name()) {
@@ -196,30 +206,6 @@ pub struct RequestPatch {
 }
 
 pub type ApiPatch = IndexMap<String, Value>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApiType {
-    ChatCompletions,
-    Embeddings,
-    Rerank,
-}
-
-impl ApiType {
-    pub fn name(&self) -> &str {
-        match self {
-            ApiType::ChatCompletions => "chat_completions",
-            ApiType::Embeddings => "embeddings",
-            ApiType::Rerank => "rerank",
-        }
-    }
-    pub fn extract_patch<'a>(&self, patch: &'a RequestPatch) -> Option<&'a ApiPatch> {
-        match self {
-            ApiType::ChatCompletions => patch.chat_completions.as_ref(),
-            ApiType::Embeddings => patch.embeddings.as_ref(),
-            ApiType::Rerank => patch.rerank.as_ref(),
-        }
-    }
-}
 
 pub struct RequestData {
     pub url: String,
@@ -278,6 +264,8 @@ impl RequestData {
             for (key, value) in patch_headers {
                 if let Some(value) = value.as_str() {
                     self.header(key, value)
+                } else if value.is_null() {
+                    self.headers.swap_remove(key);
                 }
             }
         }
@@ -350,71 +338,96 @@ pub struct RerankResult {
     pub relevance_score: f64,
 }
 
-pub type PromptAction<'a> = (&'a str, &'a str, bool, PromptKind);
+pub type PromptAction<'a> = (&'a str, &'a str, Option<&'a str>);
 
-pub fn create_config(prompts: &[PromptAction], client: &str) -> Result<(String, Value)> {
+pub async fn create_config(
+    prompts: &[PromptAction<'static>],
+    client: &str,
+) -> Result<(String, Value)> {
     let mut config = json!({
         "type": client,
     });
-    let mut model = client.to_string();
-    set_client_config(prompts, &mut model, &mut config)?;
+    for (key, desc, help_message) in prompts {
+        let env_name = format!("{client}_{key}").to_ascii_uppercase();
+        let required = std::env::var(&env_name).is_err();
+        let value = prompt_input_string(desc, required, *help_message)?;
+        if !value.is_empty() {
+            config[key] = value.into();
+        }
+    }
+    let model = set_client_models_config(&mut config, client).await?;
     let clients = json!(vec![config]);
     Ok((model, clients))
 }
 
-pub fn create_openai_compatible_client_config(client: &str) -> Result<Option<(String, Value)>> {
-    match super::OPENAI_COMPATIBLE_PLATFORMS
+pub async fn create_openai_compatible_client_config(
+    client: &str,
+) -> Result<Option<(String, Value)>> {
+    let api_base = super::OPENAI_COMPATIBLE_PROVIDERS
         .into_iter()
         .find(|(name, _)| client == *name)
-    {
-        None => Ok(None),
-        Some((name, api_base)) => {
-            let mut config = json!({
-                "type": OpenAICompatibleClient::NAME,
-                "name": name,
-            });
-            let mut prompts = vec![];
-            if api_base.is_empty() {
-                prompts.push(("api_base", "API Base:", true, PromptKind::String));
-            } else {
-                config["api_base"] = api_base.into();
-            }
-            prompts.push(("api_key", "API Key:", false, PromptKind::String));
-            if !ALL_MODELS.iter().any(|v| v.platform == name) {
-                prompts.extend([
-                    ("models[].name", "Model Name:", true, PromptKind::String),
-                    (
-                        "models[].max_input_tokens",
-                        "Max Input Tokens:",
-                        false,
-                        PromptKind::Integer,
-                    ),
-                ]);
-            };
-            let mut model = client.to_string();
-            set_client_config(&prompts, &mut model, &mut config)?;
-            let clients = json!(vec![config]);
-            Ok(Some((model, clients)))
-        }
+        .map(|(_, api_base)| api_base)
+        .unwrap_or("http(s)://{API_ADDR}/v1");
+
+    let name = if client == OpenAICompatibleClient::NAME {
+        let value = prompt_input_string("Provider Name", true, None)?;
+        value.replace(' ', "-")
+    } else {
+        client.to_string()
+    };
+
+    let mut config = json!({
+        "type": OpenAICompatibleClient::NAME,
+        "name": &name,
+    });
+
+    let api_base = if api_base.contains('{') {
+        prompt_input_string("API Base", true, Some(&format!("e.g. {api_base}")))?
+    } else {
+        api_base.to_string()
+    };
+    config["api_base"] = api_base.into();
+
+    let api_key = prompt_input_string("API Key", false, None)?;
+    if !api_key.is_empty() {
+        config["api_key"] = api_key.into();
     }
+
+    let model = set_client_models_config(&mut config, &name).await?;
+    let clients = json!(vec![config]);
+    Ok(Some((model, clients)))
 }
 
 pub async fn call_chat_completions(
     input: &Input,
+    print: bool,
+    extract_code: bool,
     client: &dyn Client,
-    config: &GlobalConfig,
+    abort_signal: AbortSignal,
 ) -> Result<(String, Vec<ToolResult>)> {
-    let task = client.chat_completions(input.clone());
-    let ret = run_with_spinner(task, "Generating").await;
+    let ret = abortable_run_with_spinner(
+        client.chat_completions(input.clone()),
+        "Generating",
+        abort_signal,
+    )
+    .await;
+
     match ret {
         Ok(ret) => {
             let ChatCompletionsOutput {
-                text, tool_calls, ..
+                mut text,
+                tool_calls,
+                ..
             } = ret;
             if !text.is_empty() {
-                config.read().print_markdown(&text)?;
+                if extract_code {
+                    text = extract_code_block(&text).to_string();
+                }
+                if print {
+                    client.global_config().read().print_markdown(&text)?;
+                }
             }
-            Ok((text, eval_tool_calls(config, tool_calls)?))
+            Ok((text, eval_tool_calls(client.global_config(), tool_calls)?))
         }
         Err(err) => Err(err),
     }
@@ -423,16 +436,19 @@ pub async fn call_chat_completions(
 pub async fn call_chat_completions_streaming(
     input: &Input,
     client: &dyn Client,
-    config: &GlobalConfig,
-    abort: AbortSignal,
+    abort_signal: AbortSignal,
 ) -> Result<(String, Vec<ToolResult>)> {
     let (tx, rx) = unbounded_channel();
-    let mut handler = SseHandler::new(tx, abort.clone());
+    let mut handler = SseHandler::new(tx, abort_signal.clone());
 
     let (send_ret, render_ret) = tokio::join!(
         client.chat_completions_streaming(input, &mut handler),
-        render_stream(rx, config, abort.clone()),
+        render_stream(rx, client.global_config(), abort_signal.clone()),
     );
+
+    if handler.abort().aborted() {
+        bail!("Aborted.");
+    }
 
     render_ret?;
 
@@ -442,7 +458,7 @@ pub async fn call_chat_completions_streaming(
             if !text.is_empty() && !text.ends_with('\n') {
                 println!();
             }
-            Ok((text, eval_tool_calls(config, tool_calls)?))
+            Ok((text, eval_tool_calls(client.global_config(), tool_calls)?))
         }
         Err(err) => {
             if !text.is_empty() {
@@ -451,23 +467,6 @@ pub async fn call_chat_completions_streaming(
             Err(err)
         }
     }
-}
-
-#[allow(unused)]
-pub async fn chat_completions_as_streaming<F, Fut>(
-    builder: RequestBuilder,
-    handler: &mut SseHandler,
-    f: F,
-) -> Result<()>
-where
-    F: FnOnce(RequestBuilder) -> Fut,
-    Fut: Future<Output = Result<String>>,
-{
-    let text = f(builder).await?;
-    handler.text(&text)?;
-    handler.done();
-
-    Ok(())
 }
 
 pub fn noop_prepare_embeddings<T>(_client: &T, _data: &EmbeddingsData) -> Result<RequestData> {
@@ -535,96 +534,138 @@ pub fn json_str_from_map<'a>(
     map.get(field_name).and_then(|v| v.as_str())
 }
 
-pub fn maybe_catch_error(data: &Value) -> Result<()> {
-    if let (Some(code), Some(message)) = (data["code"].as_str(), data["message"].as_str()) {
-        debug!("Invalid response: {}", data);
-        bail!("{message} (code: {code})");
-    } else if let (Some(error_code), Some(error_msg)) =
-        (data["error_code"].as_number(), data["error_msg"].as_str())
-    {
-        debug!("Invalid response: {}", data);
-        bail!("{error_msg} (error_code: {error_code})");
+async fn set_client_models_config(client_config: &mut Value, client: &str) -> Result<String> {
+    if let Some(provider) = ALL_PROVIDER_MODELS.iter().find(|v| v.provider == client) {
+        let models: Vec<String> = provider
+            .models
+            .iter()
+            .filter(|v| v.model_type == "chat")
+            .map(|v| v.name.clone())
+            .collect();
+        let model_name = select_model(models)?;
+        return Ok(format!("{client}:{model_name}"));
     }
-    Ok(())
-}
-
-fn set_client_config(
-    list: &[PromptAction],
-    model: &mut String,
-    client_config: &mut Value,
-) -> Result<()> {
-    let env_prefix = model.clone();
-    for (path, desc, required, kind) in list {
-        let mut required = *required;
-        if required {
-            let env_name = format!("{env_prefix}_{path}").to_ascii_uppercase();
-            if std::env::var(&env_name).is_ok() {
-                required = false;
+    let mut model_names = vec![];
+    if let (Some(true), Some(api_base), api_key) = (
+        client_config["type"]
+            .as_str()
+            .map(|v| v == OpenAICompatibleClient::NAME),
+        client_config["api_base"].as_str(),
+        client_config["api_key"]
+            .as_str()
+            .map(|v| v.to_string())
+            .or_else(|| {
+                let env_name = format!("{client}_api_key").to_ascii_uppercase();
+                std::env::var(&env_name).ok()
+            }),
+    ) {
+        match abortable_run_with_spinner(
+            fetch_models(api_base, api_key.as_deref()),
+            "Fetching models",
+            create_abort_signal(),
+        )
+        .await
+        {
+            Ok(fetched_models) => {
+                model_names = MultiSelect::new("LLMs to include (required):", fetched_models)
+                    .with_validator(|list: &[ListOption<&String>]| {
+                        if list.is_empty() {
+                            Ok(Validation::Invalid(
+                                "At least one item must be selected".into(),
+                            ))
+                        } else {
+                            Ok(Validation::Valid)
+                        }
+                    })
+                    .prompt()?;
+            }
+            Err(err) => {
+                eprintln!("✗ Fetch models failed: {err}");
             }
         }
-        match kind {
-            PromptKind::String => {
-                let value = prompt_input_string(desc, required)?;
-                set_client_config_value(client_config, path, kind, &value);
-                if *path == "name" {
-                    *model = value;
-                }
-            }
-            PromptKind::Integer => {
-                let value = prompt_input_integer(desc, required)?;
-                set_client_config_value(client_config, path, kind, &value);
-            }
-        }
     }
-    Ok(())
+    if model_names.is_empty() {
+        model_names = prompt_input_string(
+            "LLMs to add",
+            true,
+            Some("Separated by commas, e.g. llama3.3,qwen2.5"),
+        )?
+        .split(',')
+        .filter_map(|v| {
+            let v = v.trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+    }
+    if model_names.is_empty() {
+        bail!("No models");
+    }
+    let models: Vec<Value> = model_names
+        .iter()
+        .map(|v| {
+            let l = v.to_lowercase();
+            if l.contains("rank") {
+                json!({
+                    "name": v,
+                    "type": "reranker",
+                })
+            } else if let Ok(true) = EMBEDDING_MODEL_RE.is_match(&l) {
+                json!({
+                    "name": v,
+                    "type": "embedding",
+                    "default_chunk_size": 1000,
+                    "max_batch_size": 100
+                })
+            } else if v.contains("vision") {
+                json!({
+                    "name": v,
+                    "supports_vision": true
+                })
+            } else {
+                json!({
+                    "name": v,
+                })
+            }
+        })
+        .collect();
+    client_config["models"] = models.into();
+    let model_name = select_model(model_names)?;
+    Ok(format!("{client}:{model_name}"))
 }
 
-fn set_client_config_value(client_config: &mut Value, path: &str, kind: &PromptKind, value: &str) {
-    let segs: Vec<&str> = path.split('.').collect();
-    match segs.as_slice() {
-        [name] => client_config[name] = prompt_value_to_json(kind, value),
-        [scope, name] => match scope.split_once('[') {
-            None => {
-                if client_config.get(scope).is_none() {
-                    let mut obj = json!({});
-                    obj[name] = prompt_value_to_json(kind, value);
-                    client_config[scope] = obj;
-                } else {
-                    client_config[scope][name] = prompt_value_to_json(kind, value);
-                }
-            }
-            Some((scope, _)) => {
-                if client_config.get(scope).is_none() {
-                    let mut obj = json!({});
-                    obj[name] = prompt_value_to_json(kind, value);
-                    client_config[scope] = json!([obj]);
-                } else {
-                    client_config[scope][0][name] = prompt_value_to_json(kind, value);
-                }
-            }
-        },
-        _ => {}
+fn select_model(model_names: Vec<String>) -> Result<String> {
+    if model_names.is_empty() {
+        bail!("No models");
     }
-}
-
-fn prompt_value_to_json(kind: &PromptKind, value: &str) -> Value {
-    if value.is_empty() {
-        return Value::Null;
-    }
-    match kind {
-        PromptKind::String => value.into(),
-        PromptKind::Integer => match value.parse::<i32>() {
-            Ok(value) => value.into(),
-            Err(_) => value.into(),
-        },
-    }
-}
-
-fn split_content(text: &str) -> Vec<&str> {
-    if text.is_ascii() {
-        text.split_inclusive(|c: char| c.is_ascii_whitespace())
-            .collect()
+    let model = if model_names.len() == 1 {
+        model_names[0].clone()
     } else {
-        unicode_segmentation::UnicodeSegmentation::graphemes(text, true).collect()
+        Select::new("Default Model (required):", model_names).prompt()?
+    };
+    Ok(model)
+}
+
+fn prompt_input_string(
+    desc: &str,
+    required: bool,
+    help_message: Option<&str>,
+) -> anyhow::Result<String> {
+    let desc = if required {
+        format!("{desc} (required):")
+    } else {
+        format!("{desc} (optional):")
+    };
+    let mut text = Text::new(&desc);
+    if required {
+        text = text.with_validator(required!("This field is required"))
     }
+    if let Some(help_message) = help_message {
+        text = text.with_help_message(help_message);
+    }
+    let text = text.prompt()?;
+    Ok(text)
 }

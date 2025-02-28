@@ -6,21 +6,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" href="data:;base64,iVBORw0KGgo=">
   <title>AIChat LLM Playground</title>
-  <link rel="stylesheet" href="//unpkg.com/github-markdown-css@5.5.1/github-markdown.css">
-  <link rel="stylesheet" href="//unpkg.com/highlight.js@11.9.0/styles/github-dark.min.css"
+  <link rel="stylesheet" href="//unpkg.com/katex@0.16.11/dist/katex.min.css">
+  <link rel="stylesheet" href="//unpkg.com/github-markdown-css@5.8.1/github-markdown.css">
+  <link rel="stylesheet" href="//unpkg.com/@highlightjs/cdn-assets@11.10.0/styles/github-dark.min.css"
     media="screen and (prefers-color-scheme: dark)">
-  <link rel="stylesheet" href="//unpkg.com/highlight.js@11.9.0/styles/github.min.css"
+  <link rel="stylesheet" href="//unpkg.com/@highlightjs/cdn-assets@11.10.0/styles/github.min.css"
     media="screen and (prefers-color-scheme: light)">
-  <script src="//unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
-  <script src="//unpkg.com/marked@12.0.2/lib/marked.umd.js" defer></script>
-  <script src="//unpkg.com/alpinejs@3.13.10/dist/cdn.min.js" defer></script>
+  <script src="//unpkg.com/@highlightjs/cdn-assets@11.10.0/highlight.min.js" defer></script>
+  <script src="//unpkg.com/marked@15.0.3/lib/marked.umd.js" defer></script>
+  <script src="//unpkg.com/katex@0.16.11/dist/katex.min.js" defer></script>
+  <script src="//unpkg.com/@sigodenjs/marked-katex-extension@1.0.0/lib/index.umd.js" defer></script>
+  <script src="//unpkg.com/alpinejs@3.14.6/dist/cdn.min.js" defer></script>
   <style>
     :root {
       --fg-primary: #1652f1;
       --fg-default: black;
       --bg-primary: white;
       --bg-default: #f9f9f9;
-      --border-primary: #c3c3c3;
+      --bg-toast: rgba(0, 0, 0, 0.7);
+      --bg-cover: rgba(0, 0, 0, 0.5);
+      --bg-hover: #f0f0f0;
+      --border-color: #c3c3c3;
+      --shadow-color: rgba(0, 0, 0, 0.1);
     }
 
     [x-cloak] {
@@ -67,11 +74,13 @@
       flex-shrink: 0;
       margin-right: 1.25rem;
       background-color: var(--bg-primary);
-      box-shadow: 0 0 0.3rem rgba(0, 0, 0, 0.1);
+      box-shadow: 0 0 0.3rem var(--shadow-color);
       border-radius: 0.3rem;
     }
 
     .sidebar-header {
+      display: flex;
+      align-items: center;
       padding: 1.25rem;
     }
 
@@ -85,13 +94,21 @@
       padding-top: 0.3rem;
     }
 
+    .sidebar-right {
+      display: flex;
+      flex-direction: row;
+      margin-left: auto;
+      gap: 6px;
+    }
+
+    .sidebar-btn {
+      cursor: pointer;
+      width: 1.2rem;
+      height: 1.2rem;
+    }
+
     .hide-sidebar-btn {
       display: none;
-      width: 1.5rem;
-      height: 1.5rem;
-      position: absolute;
-      right: 1.5rem;
-      top: 1.5rem;
     }
 
     .settings {
@@ -108,7 +125,7 @@
       width: 100%;
       padding: 0.5rem;
       margin-bottom: 0.625rem;
-      border: 1px solid var(--border-primary);
+      border: 1px solid var(--border-color);
       border-radius: 0.25rem;
       box-sizing: border-box;
     }
@@ -117,7 +134,7 @@
       width: 100%;
       height: 150px;
       padding: 0.5rem;
-      border: 1px solid var(--border-primary);
+      border: 1px solid var(--border-color);
       border-radius: 0.25rem;
       box-sizing: border-box;
       margin-bottom: 0.625rem;
@@ -137,7 +154,7 @@
       flex-direction: column;
       width: calc(100vw - 360px - 2.5rem);
       background-color: var(--bg-primary);
-      box-shadow: 0 0 0.3rem rgba(0, 0, 0, 0.1);
+      box-shadow: 0 0 0.3rem var(--shadow-color);
       border-radius: 0.3rem;
     }
 
@@ -145,7 +162,7 @@
       display: flex;
       flex-direction: row;
       padding: 1.25rem;
-      border-bottom: 1px solid var(--border-primary);
+      border-bottom: 1px solid var(--border-color);
     }
 
     .chat-header select {
@@ -302,13 +319,13 @@
 
     .input-panel {
       position: relative;
-      border-top: 1px solid var(--border-primary);
+      border-top: 1px solid var(--border-color);
     }
 
     .input-panel-inner {
       margin: 1rem;
       padding: 0.5rem;
-      border: 1px solid var(--border-primary);
+      border: 1px solid var(--border-color);
       border-radius: 1rem;
     }
 
@@ -391,11 +408,79 @@
       opacity: 0.3;
     }
 
+    .session-list {
+      padding-top: 0.4rem;
+      max-height: 80vh;
+      font-size: 0.8rem;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+
+    .session-item {
+      padding: 5px;
+      border-bottom: 1px solid var(--border-color);
+      cursor: pointer;
+    }
+
+    .session-item:hover {
+      background-color: var(--bg-hover);
+    }
+
+    .session-title {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: var(--bg-cover);
+      z-index: 1000;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding-top: 50px;
+    }
+
+    .modal-content {
+      position: relative;
+      padding: 0.8rem;
+      border-radius: 8px;
+      max-width: 1000px;
+      width: calc(100% - 100px);
+      background-color: var(--bg-primary);
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    }
+
+    .modal-header {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+    }
+
+    .modal-header .title {
+      font-weight: 500;
+      font-size: 1.5rem;
+    }
+
+    .modal-header .close-btn {
+      margin-left: auto;
+      color: var(--fg-default);
+      background: none;
+      border: none;
+      font-size: 24px;
+      cursor: pointer;
+    }
+
     .spinner {
       width: 1.1rem;
       height: 1.1rem;
       margin-top: 3px;
-      border: 2px solid #000;
+      border: 2px solid var(--fg-default);
       border-bottom-color: transparent;
       border-radius: 50%;
       display: inline-block;
@@ -408,7 +493,7 @@
       bottom: 1rem;
       left: 1rem;
       text-align: center;
-      background-color: rgba(0, 0, 0, 0.7);
+      background-color: var(--bg-toast);
       color: var(--bg-primary);
       padding: 0.5rem;
       border-radius: 0.3rem;
@@ -431,7 +516,11 @@
         --fg-default: white;
         --bg-primary: black;
         --bg-default: #121212;
-        --border-primary: #3c3c3c;
+        --bg-toast: rgba(255, 255, 255, 0.7);
+        --bg-cover: rgba(255, 255, 255, 0.5);
+        --bg-hover: #1f1f1f;
+        --border-color: #3c3c3c;
+        --shadow-color: rgba(255, 255, 255, 0.1);
       }
     }
 
@@ -491,13 +580,35 @@
   <div class="container" x-data="app">
     <div class="sidebar" x-ref="sidebar">
       <div class="sidebar-header">
-        <div class="title">AIChat</div>
-        <div class="subtitle">All-in-one AI-Powered Chat & Copilot</div>
-        <div class="hide-sidebar-btn" @click="handleHideSidebarBtnClick">
-          <svg fill="currentColor" viewBox="0 0 16 16">
-            <path
-              d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708" />
-          </svg>
+        <div class="sidebar-left">
+          <div class="title">AIChat</div>
+          <div class="subtitle">All-in-one AI-Powered Chat</div>
+        </div>
+        <div class="sidebar-right">
+          <div class="sidebar-btn new-chat-btn" title="New Chat (Ctrl/Cmd+Shift+O)" @click="handleNewChat">
+            <svg fill="currentColor" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16" />
+              <path
+                d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4" />
+            </svg>
+          </div>
+          <div class="sidebar-btn list-sessions-btn" title="List Sessions (Ctrl/Cmd+Shift+L)"
+            @click="showModal = 'list-sessions'">
+            <svg fill="currentColor" viewBox="0 0 16 16">
+              <path fill-rule="evenodd"
+                d="M2 2.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5V3a.5.5 0 0 0-.5-.5zM3 3H2v1h1z" />
+              <path
+                d="M5 3.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5M5.5 7a.5.5 0 0 0 0 1h9a.5.5 0 0 0 0-1zm0 4a.5.5 0 0 0 0 1h9a.5.5 0 0 0 0-1z" />
+              <path fill-rule="evenodd"
+                d="M1.5 7a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5H2a.5.5 0 0 1-.5-.5zM2 7h1v1H2zm0 3.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5zm1 .5H2v1h1z" />
+            </svg>
+          </div>
+          <div class="sidebar-btn hide-sidebar-btn" @click="handleHideSidebarBtnClick">
+            <svg fill="currentColor" viewBox="0 0 16 16">
+              <path
+                d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708" />
+            </svg>
+          </div>
         </div>
       </div>
       <div class="settings">
@@ -528,17 +639,17 @@
           <label for="max_output_tokens"
             x-text="'Max Output Tokens' + (modelData.max_output_token ? ' [1, ' + modelData.max_output_token + ']' : '')">Max
             Output Tokens</label>
-          <input type="number" id="max_output_tokens" x-model="settings.max_output_tokens">
+          <input type="number" id="max_output_tokens" x-model.number="settings.max_output_tokens">
         </div>
 
         <div class="control">
           <label for="temperature">Temperature</label>
-          <input type="number" id="temperature" x-model="settings.temperature">
+          <input type="number" id="temperature" x-model.number="settings.temperature">
         </div>
 
         <div class="control">
           <label for="top_p">Top P</label>
-          <input type="number" id="top_p" x-model="settings.top_p">
+          <input type="number" id="top_p" x-model.number="settings.top_p">
         </div>
 
       </div>
@@ -626,13 +737,15 @@
                       </svg>
                     </div>
                   </template>
-                  <template
-                    x-if="message.state == 'succeed' && !!window.speechSynthesis">
+                  <template x-if="message.state == 'succeed' && !!window.speechSynthesis">
                     <div class="tts-message-btn" @click="handleTTSMessage(message.content)" title="Text to speech">
                       <svg fill="currentColor" viewBox="0 0 16 16">
-                        <path d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303z"/>
-                        <path d="M10.121 12.596A6.48 6.48 0 0 0 12.025 8a6.48 6.48 0 0 0-1.904-4.596l-.707.707A5.48 5.48 0 0 1 11.025 8a5.48 5.48 0 0 1-1.61 3.89z"/>
-                        <path d="M10.025 8a4.5 4.5 0 0 1-1.318 3.182L8 10.475A3.5 3.5 0 0 0 9.025 8c0-.966-.392-1.841-1.025-2.475l.707-.707A4.5 4.5 0 0 1 10.025 8M7 4a.5.5 0 0 0-.812-.39L3.825 5.5H1.5A.5.5 0 0 0 1 6v4a.5.5 0 0 0 .5.5h2.325l2.363 1.89A.5.5 0 0 0 7 12zM4.312 6.39 6 5.04v5.92L4.312 9.61A.5.5 0 0 0 4 9.5H2v-3h2a.5.5 0 0 0 .312-.11"/>
+                        <path
+                          d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303z" />
+                        <path
+                          d="M10.121 12.596A6.48 6.48 0 0 0 12.025 8a6.48 6.48 0 0 0-1.904-4.596l-.707.707A5.48 5.48 0 0 1 11.025 8a5.48 5.48 0 0 1-1.61 3.89z" />
+                        <path
+                          d="M10.025 8a4.5 4.5 0 0 1-1.318 3.182L8 10.475A3.5 3.5 0 0 0 9.025 8c0-.966-.392-1.841-1.025-2.475l.707-.707A4.5 4.5 0 0 1 10.025 8M7 4a.5.5 0 0 0-.812-.39L3.825 5.5H1.5A.5.5 0 0 0 1 6v4a.5.5 0 0 0 .5.5h2.325l2.363 1.89A.5.5 0 0 0 7 12zM4.312 6.39 6 5.04v5.92L4.312 9.61A.5.5 0 0 0 4 9.5H2v-3h2a.5.5 0 0 0 .312-.11" />
                       </svg>
                     </div>
                   </template>
@@ -650,7 +763,7 @@
       </div>
       <div class="input-panel">
         <div class="input-panel-inner">
-          <textarea id="chat-input" x-model="input" x-ref="input" @keydown.enter="handleEnterKeydown"
+          <textarea id="chat-input" x-model="input" x-ref="input" @keydown.enter="handleEnterKeyDown"
             placeholder="Ask Anything" autofocus></textarea>
           <div class="input-image-bar" x-show="images.length > 0">
             <template x-for="(image, index) in images">
@@ -700,6 +813,22 @@
         </div>
       </div>
     </div>
+    <div class="modal" x-cloak x-show="showModal == 'list-sessions'"
+      @click="if ($event.target == $el) { showModal = ''}">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div class="title">Sessions</div>
+          <button class="close-btn" @click="showModal = ''">&times;</button>
+        </div>
+        <div class="session-list">
+          <template x-for="session in sessions" :key="session.id">
+            <div class="session-item" @click="handleSelectSession(session.id)">
+              <div class="session-title" x-text="session.sessionTitle"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
     <div id="toast" class="toast"></div>
   </div>
   <script>
@@ -733,18 +862,21 @@
         models: [],
         rags: [""],
         roles: [{ name: "", prompt: "" }],
+        settings: defaultSettings,
         modelData: {},
         messages: [],
-        hoveredMessageIndex: null,
         input: "",
         images: [],
         asking: false,
-        sessionMode: false,
         askAbortController: null,
+        hoveredMessageIndex: null,
         shouldScrollChatBodyToBottom: true,
         isShowScrollToBottomBtn: false,
-        summary: "",
-        settings: defaultSettings,
+        showModal: "",
+        sessionMode: false,
+        sessionTitle: "",
+        selectSessionId: null,
+        sessions: [],
 
         async init() {
           await Promise.all([
@@ -761,6 +893,7 @@
               this.roles.push(...roles.filter(v => !!v.prompt));
             }).catch(() => { }),
           ])
+          this.$refs.input.addEventListener("paste", (e) => this.handlePaste(e));
           this.$watch("input", () => this.autosizeInput(this.$refs.input));
           this.$watch("settings", () => this.updateUrl());
           this.$watch("settings.model", () => this.handleModelChange());
@@ -778,6 +911,7 @@
           } else {
             this.settings.role = "";
           }
+          document.addEventListener("keydown", (event) => this.handleKeyDown(event))
         },
 
         handleAsk() {
@@ -785,6 +919,16 @@
           const isEmptyImage = this.images.length === 0;
           if (this.asking || (isEmptyImage && isEmptyInput)) {
             return;
+          }
+          if (this.messages.length === 0) {
+            let sessionTitle = ""
+            if (this.images.length > 0) {
+              sessionTitle = `🖼️x${this.images.length} `
+            }
+            if (this.input) {
+              sessionTitle += this.input.trim().replace(/\n/g, "↵").slice(0, 200);
+            }
+            this.sessionTitle = sessionTitle;
           }
           if (isEmptyImage) {
             this.messages.push({
@@ -857,6 +1001,9 @@
         },
 
         handleRoleChange() {
+          if (this.settings.prompt && !this.settings.role) {
+            return;
+          }
           this.settings.prompt = this.roles.find(role => role.name === this.settings.role).prompt;
         },
 
@@ -892,7 +1039,7 @@
           this.$refs["main-panel"].style.display = this.$refs["main-panel"]._display;
         },
 
-        handleEnterKeydown(event) {
+        handleEnterKeyDown(event) {
           if (event.shiftKey) {
             return;
           }
@@ -939,6 +1086,87 @@
           event.target.value = "";
         },
 
+        async handlePaste(event) {
+          const files = Array.from(event.clipboardData.items).filter(v => v.type.startsWith('image/')).map(v => v.getAsFile());
+          const urls = await Promise.all(files.map(file => convertImageToDataURL(file)));
+          this.images.push(...urls);
+        },
+
+        handleKeyDown(event) {
+          const isMac = navigator.platform.toUpperCase().indexOf('MAC') > -1;
+          const controlKey = isMac ? event.metaKey : event.ctrlKey;
+          if (controlKey && event.shiftKey && event.key.toLowerCase() === 'o') {
+            event.preventDefault();
+            this.handleNewChat();
+          } else if (controlKey && event.shiftKey && event.key.toLowerCase() === 'l') {
+            event.preventDefault();
+            this.showModal = 'list-sessions'
+          } else if (event.shiftKey && event.key === "Escape") {
+            event.preventDefault();
+            this.focusInput();
+          } else if (this.showModal && event.key === "Escape") {
+            event.preventDefault();
+            this.showModal = "";
+          }
+        },
+
+        handleNewChat() {
+          if (this.asking) {
+            this.askAbortController?.abort();
+          }
+          if (this.sessionTitle) {
+            const lastMessage = this.messages[this.messages.length - 1];
+            if (lastMessage.state === "loading") {
+              lastMessage.state = "failed";
+              lastMessage.error = "Error: Aborted";
+              lastMessage.html = renderMarkdown(lastMessage.content, lastMessage.error);
+            }
+            const sessionData = JSON.parse(JSON.stringify({
+              settings: this.settings,
+              messages: this.messages,
+              sessionMode: this.sessionMode,
+              sessionTitle: this.sessionTitle,
+            }));
+            let session = this.sessions.find(v => v.id === this.selectSessionId);
+            if (session) {
+              Object.assign(session, sessionData);
+            } else {
+              this.sessions.unshift({
+                id: randomUUID(),
+                createdAt: Date.now(),
+                ...sessionData,
+              });
+            }
+          }
+          this.messages = [];
+          this.asking = false;
+          this.askAbortController = null;
+          this.hoveredMessageIndex = null;
+          this.shouldScrollChatBodyToBottom = true;
+          this.isShowScrollToBottomBtn = false;
+          this.showModal = "";
+          this.sessionMode = false;
+          this.sessionTitle = "";
+          this.selectSessionId = null;
+
+          this.focusInput();
+        },
+
+        handleSelectSession(id) {
+          const session = this.sessions.find(v => v.id === id);
+          if (!session || id === this.selectSessionId) {
+            this.showModal = "";
+            this.focusInput();
+            return;
+          }
+          this.handleNewChat();
+          this.settings = session.settings;
+          this.messages = session.messages;
+          this.sessionMode = session.sessionMode;
+          this.sessionTitle = session.sessionTitle;
+          this.selectSessionId = session.id;
+        },
+
         updateUrl() {
           const newUrl = new URL(location.href);
           ["model", "rag", "role", "max_output_tokens", "temperature", "top_p"].forEach(key => {
@@ -964,6 +1192,10 @@
         autosizeInput($input) {
           $input.style.height = 'auto';
           $input.style.height = $input.scrollHeight + 'px';
+        },
+
+        focusInput() {
+          this.$refs?.input?.focus();
         },
 
         async ask() {
@@ -996,7 +1228,7 @@
           } catch (err) {
             lastMessage.state = "failed";
             if (this.askAbortController?.signal?.aborted) {
-              lastMessage.error = "";
+              lastMessage.error = "Error: Aborted";
             } else {
               lastMessage.error = err?.message || err;
             }
@@ -1025,9 +1257,9 @@
         buildBody() {
           let messages = [];
           for ([userMessage, assistantMessage] of chunkArray(this.messages, 2)) {
-            if (assistantMessage.state == "failed") {
+            if (assistantMessage.state === "failed") {
               continue;
-            } else if (assistantMessage.state == "loading") {
+            } else if (assistantMessage.state === "loading") {
               messages.push({
                 role: userMessage.role,
                 content: userMessage.content,
@@ -1043,7 +1275,7 @@
               });
             }
           }
-          const systemPrompt = (this.summary || this.settings.prompt).trim();
+          const systemPrompt = this.settings.prompt.trim();
           if (systemPrompt) {
             if (messages[0]?.content?.indexOf("__INPUT__") > -1) {
               messages[0].content = systemPrompt.replace("__INPUT__", messages[0].content);
@@ -1069,6 +1301,7 @@
               messages = [...promptMessages, ...messages];
             }
           }
+          sanitizeMessages(messages);
           const body = {
             model: this.settings.model,
             messages: messages,
@@ -1139,7 +1372,7 @@
             const parsed = JSON.parse(message);
             yield parsed;
           } catch {
-            if (i == lines.length - 1) {
+            if (i === lines.length - 1) {
               reamingChunkValue += line;
               break;
             }
@@ -1229,6 +1462,20 @@
       return { system: prompt, cases: [] }
     }
 
+    function sanitizeMessages(messages) {
+      let messagesLen = messages.length;
+      for (let i = 0; i < messagesLen; i++) {
+        const message = messages[i];
+        if (typeof message.content === "string" && message.role === "assistant" && i !== messagesLen - 1) {
+          message.content = stripThinkTag(message.content);
+        }
+      }
+    }
+
+    function stripThinkTag(text) {
+      return text.replace(/^\s*<think>([\s\S]*?)<\/think>(\s*|$)/g, '')
+    }
+
     function convertImageToDataURL(imageFile) {
       return new Promise((resolve, reject) => {
         if (!imageFile) {
@@ -1244,24 +1491,56 @@
     }
 
     function setupMarked() {
-      const renderer = new marked.Renderer();
-      renderer.code = (code, language) => {
-        const validLang = !!(language && hljs.getLanguage(language));
+      const renderer = {
+        code({ text, lang }) {
+          const validLang = !!(lang && hljs.getLanguage(lang));
+          const highlighted = validLang
+            ? hljs.highlight(text, { language: lang }).value
+            : escapeForHTML(text);
 
-        const highlighted = validLang
-          ? hljs.highlight(code, { language }).value
-          : escapeForHTML(code);
-
-        return `<div class="code-block">
-        <pre><code class="hljs ${language}">${highlighted}</code></pre>
+          return `<div class="code-block">
+        <pre><code class="hljs ${lang}">${highlighted}</code></pre>
   <div class="copy-code-btn" @click="handleCopyCode" title="Copy code">
     <svg fill="currentColor" viewBox="0 0 16 16">
       <path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1zM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1z"/>
     </svg>
   </div>
 </div>`;
+        }
       };
-      marked.setOptions({ renderer });
+      const thinkExtension = {
+        name: 'think',
+        level: 'block',
+        start(src) {
+          const match = /^(\s*)<think>/.exec(src);
+          if (match) {
+            return match[1].length
+          } else {
+            return -1;
+          }
+        },
+        tokenizer(src, tokens) {
+          const rule = /^\s*<think>([\s\S]*?)(<\/think>|$)/;
+          const match = rule.exec(src);
+          if (match) {
+            return {
+              type: 'think',
+              raw: match[0],
+              text: match[1].trim(),
+            };
+          }
+        },
+        renderer(token) {
+          const text = '<p>' + token.text.trim().replace(/\n+/g, '</p><p>') + '</p>';
+          return `<details open class="think">
+            <summary>Deeply thought</summary>
+            <blockquote>${text}</blockquote>
+          </details>`;
+        },
+      };
+      marked.use({ renderer });
+      marked.use(markedKatex({ throwOnError: false, inlineTolerantNoSpace: true }));
+      marked.use({ extensions: [thinkExtension] })
     }
 
     function escapeForHTML(input) {
@@ -1291,6 +1570,14 @@
         chunks.push(array.slice(i, i + chunkSize));
       }
       return chunks;
+    }
+
+    function randomUUID() {
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
     }
 
     function renderMarkdown(text, error = '') {

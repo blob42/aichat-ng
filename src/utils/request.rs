@@ -28,8 +28,7 @@ const USER_AGENT: &str = "curl/8.6.0";
 
 lazy_static::lazy_static! {
     static ref CLIENT: Result<reqwest::Client> = {
-        let builder = reqwest::ClientBuilder::new().timeout(Duration::from_secs(30));
-        let builder = set_proxy(builder, None)?;
+        let builder = reqwest::ClientBuilder::new().timeout(Duration::from_secs(16));
         let client = builder.build()?;
         Ok(client)
     };
@@ -50,7 +49,17 @@ lazy_static::lazy_static! {
     static ref GITHUB_REPO_RE: Regex = Regex::new(r"^https://github\.com/([^/]+)/([^/]+)/tree/([^/]+)").unwrap();
 }
 
-pub async fn fetch(
+pub async fn fetch(url: &str) -> Result<String> {
+    let client = match *CLIENT {
+        Ok(ref client) => client,
+        Err(ref err) => bail!("{err}"),
+    };
+    let res = client.get(url).send().await?;
+    let output = res.text().await?;
+    Ok(output)
+}
+
+pub async fn fetch_with_loaders(
     loaders: &HashMap<String, String>,
     path: &str,
     allow_media: bool,
@@ -146,6 +155,32 @@ pub async fn fetch(
             }
         }
     };
+    Ok(result)
+}
+
+pub async fn fetch_models(api_base: &str, api_key: Option<&str>) -> Result<Vec<String>> {
+    let client = match *CLIENT {
+        Ok(ref client) => client,
+        Err(ref err) => bail!("{err}"),
+    };
+    let mut builder = client.get(format!("{}/models", api_base.trim_end_matches('/')));
+    if let Some(api_key) = api_key {
+        builder = builder.bearer_auth(api_key);
+    }
+    let res_body: Value = builder.send().await?.json().await?;
+    let mut result: Vec<String> = res_body
+        .get("data")
+        .and_then(|v| v.as_array())
+        .map(|v| {
+            v.iter()
+                .filter_map(|v| v.get("id").and_then(|v| v.as_str().map(|v| v.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    if result.is_empty() {
+        bail!("No valid models")
+    }
+    result.sort_unstable();
     Ok(result)
 }
 

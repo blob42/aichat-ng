@@ -75,7 +75,7 @@ impl Server {
     fn new(config: &GlobalConfig) -> Self {
         let mut config = config.read().clone();
         config.functions = Functions::default();
-        let mut models = list_models(&config);
+        let mut models = list_all_models(&config);
         let mut default_model = config.model.clone();
         default_model.data_mut().name = DEFAULT_MODEL_NAME.into();
         models.insert(0, &default_model);
@@ -246,12 +246,8 @@ impl Server {
 
         let abort_signal = create_abort_signal();
 
-        let rag = config
-            .read()
-            .rag_file(&name)
-            .ok()
-            .and_then(|rag_path| Rag::load(&config, &name, &rag_path).ok())
-            .ok_or_else(|| anyhow!("Invalid rag"))?;
+        let rag_path = config.read().rag_file(&name);
+        let rag = Rag::load(&config, &name, &rag_path)?;
 
         let rag_result = Config::search_rag(&config, &rag, &input, abort_signal).await?;
 
@@ -281,7 +277,7 @@ impl Server {
             tools,
         } = req_body;
 
-        let messages =
+        let mut messages =
             parse_messages(messages).map_err(|err| anyhow!("Invalid request body, {err}"))?;
 
         let functions = parse_tools(tools).map_err(|err| anyhow!("Invalid request body, {err}"))?;
@@ -313,6 +309,8 @@ impl Server {
 
         let completion_id = generate_completion_id();
         let created = Utc::now().timestamp();
+
+        patch_messages(&mut messages, client.model());
 
         let data: ChatCompletionsData = ChatCompletionsData {
             messages,
@@ -353,24 +351,46 @@ impl Server {
                     client: &dyn Client,
                     http_client: &reqwest::Client,
                     handler: &mut SseHandler,
-                    data: ChatCompletionsData,
+                    mut data: ChatCompletionsData,
                     tx: &UnboundedSender<ResEvent>,
                     is_first: Arc<AtomicBool>,
                 ) {
-                    let ret = client
-                        .chat_completions_streaming_inner(http_client, handler, data)
-                        .await;
-                    let first = match ret {
-                        Ok(()) => None,
-                        Err(err) => Some(format!("{err:?}")),
-                    };
-                    if is_first.load(Ordering::SeqCst) {
-                        let _ = tx.send(ResEvent::First(first));
-                        is_first.store(false, Ordering::SeqCst)
-                    }
-                    let tool_calls = handler.get_tool_calls();
-                    if !tool_calls.is_empty() {
-                        let _ = tx.send(ResEvent::ToolCalls(tool_calls.to_vec()));
+                    if client.model().no_stream() {
+                        data.stream = false;
+                        let ret = client.chat_completions_inner(http_client, data).await;
+                        match ret {
+                            Ok(output) => {
+                                let ChatCompletionsOutput {
+                                    text, tool_calls, ..
+                                } = output;
+                                let _ = tx.send(ResEvent::First(None));
+                                is_first.store(false, Ordering::SeqCst);
+                                let _ = tx.send(ResEvent::Text(text));
+                                if !tool_calls.is_empty() {
+                                    let _ = tx.send(ResEvent::ToolCalls(tool_calls));
+                                }
+                            }
+                            Err(err) => {
+                                let _ = tx.send(ResEvent::First(Some(format!("{err:?}"))));
+                                is_first.store(false, Ordering::SeqCst)
+                            }
+                        };
+                    } else {
+                        let ret = client
+                            .chat_completions_streaming_inner(http_client, handler, data)
+                            .await;
+                        let first = match ret {
+                            Ok(()) => None,
+                            Err(err) => Some(format!("{err:?}")),
+                        };
+                        if is_first.load(Ordering::SeqCst) {
+                            let _ = tx.send(ResEvent::First(first));
+                            is_first.store(false, Ordering::SeqCst)
+                        }
+                        let tool_calls = handler.tool_calls().to_vec();
+                        if !tool_calls.is_empty() {
+                            let _ = tx.send(ResEvent::ToolCalls(tool_calls));
+                        }
                     }
                     handler.done();
                 }
@@ -463,7 +483,8 @@ impl Server {
 
         let config = Arc::new(RwLock::new(self.config.clone()));
 
-        let embedding_model = Model::retrieve_embedding(&config.read(), &embedding_model_id)?;
+        let embedding_model =
+            Model::retrieve_model(&config.read(), &embedding_model_id, ModelType::Embedding)?;
 
         let texts = match input {
             EmbeddingsReqBodyInput::Single(v) => vec![v],
@@ -522,7 +543,8 @@ impl Server {
 
         let config = Arc::new(RwLock::new(self.config.clone()));
 
-        let reranker_model = Model::retrieve_embedding(&config.read(), &reranker_model_id)?;
+        let reranker_model =
+            Model::retrieve_model(&config.read(), &reranker_model_id, ModelType::Reranker)?;
 
         let client = init_client(&config, Some(reranker_model))?;
         let data = client
@@ -869,7 +891,7 @@ fn parse_messages(message: Vec<Value>) -> Result<Vec<Message>> {
                         }
                         output.push(Message::new(
                             MessageRole::Assistant,
-                            MessageContent::ToolResults((list, text)),
+                            MessageContent::ToolCalls(MessageContentToolCalls::new(list, text)),
                         ));
                         tool_results = None;
                     } else {

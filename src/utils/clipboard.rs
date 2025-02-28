@@ -8,13 +8,17 @@ lazy_static::lazy_static! {
 pub fn set_text(text: &str) -> anyhow::Result<()> {
     let mut clipboard = CLIPBOARD.lock().unwrap();
     match clipboard.as_mut() {
-        Some(clipboard) => clipboard.set_text(text)?,
-        None => anyhow::bail!("No available clipboard"),
+        Some(clipboard) => {
+            clipboard.set_text(text)?;
+            #[cfg(target_os = "linux")]
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        None => return Err(anyhow::anyhow!("No clipboard available").context("Failed to copy")),
     }
     Ok(())
 }
 
 #[cfg(any(target_os = "android", target_os = "emscripten"))]
 pub fn set_text(_text: &str) -> anyhow::Result<()> {
-    anyhow::bail!("No available clipboard")
+    Err(anyhow::anyhow!("No clipboard available").context("Failed to copy"))
 }

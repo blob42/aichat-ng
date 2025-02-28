@@ -1,6 +1,8 @@
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Result};
+use indexmap::IndexSet;
+use path_absolutize::Absolutize;
 
 pub fn safe_join_path<T1: AsRef<Path>, T2: AsRef<Path>>(
     base_path: T1,
@@ -28,8 +30,11 @@ pub fn safe_join_path<T1: AsRef<Path>, T2: AsRef<Path>>(
     }
 }
 
-pub async fn expand_glob_paths<T: AsRef<str>>(paths: &[T]) -> Result<Vec<String>> {
-    let mut new_paths = vec![];
+pub async fn expand_glob_paths<T: AsRef<str>>(
+    paths: &[T],
+    bail_non_exist: bool,
+) -> Result<IndexSet<String>> {
+    let mut new_paths = IndexSet::new();
     for path in paths {
         let (path_str, suffixes) = parse_glob(path.as_ref())?;
         let suffixes = if suffixes.is_empty() {
@@ -37,15 +42,52 @@ pub async fn expand_glob_paths<T: AsRef<str>>(paths: &[T]) -> Result<Vec<String>
         } else {
             Some(&suffixes)
         };
-        list_files(&mut new_paths, Path::new(&path_str), suffixes).await?;
+        list_files(
+            &mut new_paths,
+            Path::new(&path_str),
+            suffixes,
+            bail_non_exist,
+        )
+        .await?;
     }
     Ok(new_paths)
+}
+
+pub fn list_file_names<T: AsRef<Path>>(dir: T, ext: &str) -> Vec<String> {
+    match std::fs::read_dir(dir.as_ref()) {
+        Ok(rd) => {
+            let mut names = vec![];
+            for entry in rd.flatten() {
+                let name = entry.file_name();
+                if let Some(name) = name.to_string_lossy().strip_suffix(ext) {
+                    names.push(name.to_string());
+                }
+            }
+            names.sort_unstable();
+            names
+        }
+        Err(_) => vec![],
+    }
 }
 
 pub fn get_patch_extension(path: &str) -> Option<String> {
     Path::new(&path)
         .extension()
         .map(|v| v.to_string_lossy().to_lowercase())
+}
+
+pub fn to_absolute_path(path: &str) -> Result<String> {
+    Ok(Path::new(&path).absolutize()?.display().to_string())
+}
+
+pub fn resolve_home_dir(path: &str) -> String {
+    let mut path = path.to_string();
+    if path.starts_with("~/") || path.starts_with("~\\") {
+        if let Some(home_dir) = dirs::home_dir() {
+            path.replace_range(..1, &home_dir.display().to_string());
+        }
+    }
+    path
 }
 
 fn parse_glob(path_str: &str) -> Result<(String, Vec<String>)> {
@@ -77,19 +119,24 @@ fn parse_glob(path_str: &str) -> Result<(String, Vec<String>)> {
 
 #[async_recursion::async_recursion]
 async fn list_files(
-    files: &mut Vec<String>,
+    files: &mut IndexSet<String>,
     entry_path: &Path,
     suffixes: Option<&Vec<String>>,
+    bail_non_exist: bool,
 ) -> Result<()> {
     if !entry_path.exists() {
-        bail!("Not found: {}", entry_path.display());
+        if bail_non_exist {
+            bail!("Not found '{}'", entry_path.display());
+        } else {
+            return Ok(());
+        }
     }
     if entry_path.is_dir() {
         let mut reader = tokio::fs::read_dir(entry_path).await?;
         while let Some(entry) = reader.next_entry().await? {
             let path = entry.path();
             if path.is_dir() {
-                list_files(files, &path, suffixes).await?;
+                list_files(files, &path, suffixes, bail_non_exist).await?;
             } else {
                 add_file(files, suffixes, &path);
             }
@@ -100,11 +147,11 @@ async fn list_files(
     Ok(())
 }
 
-fn add_file(files: &mut Vec<String>, suffixes: Option<&Vec<String>>, path: &Path) {
+fn add_file(files: &mut IndexSet<String>, suffixes: Option<&Vec<String>>, path: &Path) {
     if is_valid_extension(suffixes, path) {
         let path = path.display().to_string();
         if !files.contains(&path) {
-            files.push(path);
+            files.insert(path);
         }
     }
 }

@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::utils::{base64_decode, encode_uri, hex_encode, hmac_sha256, sha256};
+use crate::utils::{base64_decode, encode_uri, hex_encode, hmac_sha256, sha256, strip_think_tag};
 
 use anyhow::{bail, Context, Result};
 use aws_smithy_eventstream::frame::{DecodedFrame, MessageFrameDecoder};
@@ -31,19 +31,9 @@ impl BedrockClient {
     config_get_fn!(region, get_region);
 
     pub const PROMPTS: [PromptAction<'static>; 3] = [
-        (
-            "access_key_id",
-            "AWS Access Key ID",
-            true,
-            PromptKind::String,
-        ),
-        (
-            "secret_access_key",
-            "AWS Secret Access Key",
-            true,
-            PromptKind::String,
-        ),
-        ("region", "AWS Region", true, PromptKind::String),
+        ("access_key_id", "AWS Access Key ID", None),
+        ("secret_access_key", "AWS Secret Access Key", None),
+        ("region", "AWS Region", None),
     ];
 
     fn chat_completions_builder(
@@ -56,7 +46,7 @@ impl BedrockClient {
         let region = self.get_region()?;
         let host = format!("bedrock-runtime.{region}.amazonaws.com");
 
-        let model_name = &self.model.name();
+        let model_name = &self.model.real_name();
 
         let uri = if data.stream {
             format!("/model/{model_name}/converse-stream")
@@ -67,7 +57,7 @@ impl BedrockClient {
         let body = build_chat_completions_body(data, &self.model)?;
 
         let mut request_data = RequestData::new("", body);
-        self.patch_request_data(&mut request_data, ApiType::ChatCompletions);
+        self.patch_request_data(&mut request_data);
         let RequestData {
             url: _,
             headers,
@@ -105,7 +95,7 @@ impl BedrockClient {
         let region = self.get_region()?;
         let host = format!("bedrock-runtime.{region}.amazonaws.com");
 
-        let uri = format!("/model/{}/invoke", self.model.name());
+        let uri = format!("/model/{}/invoke", self.model.real_name());
 
         let input_type = match data.query {
             true => "search_query",
@@ -118,7 +108,7 @@ impl BedrockClient {
         });
 
         let mut request_data = RequestData::new("", body);
-        self.patch_request_data(&mut request_data, ApiType::Embeddings);
+        self.patch_request_data(&mut request_data);
         let RequestData {
             url: _,
             headers,
@@ -208,6 +198,7 @@ async fn chat_completions_streaming(
     let mut function_name = String::new();
     let mut function_arguments = String::new();
     let mut function_id = String::new();
+    let mut reasoning_state = 0;
 
     let mut stream = res.bytes_stream();
     let mut buffer = BytesMut::new();
@@ -233,7 +224,7 @@ async fn chat_completions_streaming(
                                     if !function_name.is_empty() {
                                         let arguments: Value =
                                         function_arguments.parse().with_context(|| {
-                                            format!("Tool call '{function_name}' is invalid: arguments must be in valid JSON format")
+                                            format!("Tool call '{function_name}' have non-JSON arguments '{function_arguments}'")
                                         })?;
                                         handler.tool_call(ToolCall::new(
                                             function_name.clone(),
@@ -250,14 +241,26 @@ async fn chat_completions_streaming(
                         "contentBlockDelta" => {
                             if let Some(text) = data["delta"]["text"].as_str() {
                                 handler.text(text)?;
+                            } else if let Some(text) =
+                                data["delta"]["reasoningContent"]["text"].as_str()
+                            {
+                                if reasoning_state == 0 {
+                                    handler.text("<think>\n")?;
+                                    reasoning_state = 1;
+                                }
+                                handler.text(text)?;
                             } else if let Some(input) = data["delta"]["toolUse"]["input"].as_str() {
                                 function_arguments.push_str(input);
                             }
                         }
                         "contentBlockStop" => {
+                            if reasoning_state == 1 {
+                                handler.text("\n</think>\n\n")?;
+                                reasoning_state = 0;
+                            }
                             if !function_name.is_empty() {
                                 let arguments: Value = function_arguments.parse().with_context(|| {
-                                    format!("Tool call '{function_name}' is invalid: arguments must be in valid JSON format")
+                                    format!("Tool call '{function_name}' have non-JSON arguments '{function_arguments}'")
                                 })?;
                                 handler.tool_call(ToolCall::new(
                                     function_name.clone(),
@@ -316,11 +319,16 @@ fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Resu
 
     let mut network_image_urls = vec![];
 
+    let messages_len = messages.len();
     let messages: Vec<Value> = messages
         .into_iter()
-        .flat_map(|message| {
+        .enumerate()
+        .flat_map(|(i, message)| {
             let Message { role, content } = message;
             match content {
+                MessageContent::Text(text) if role.is_assistant() && i != messages_len - 1 => {
+                    vec![json!({ "role": role, "content": [ { "text": strip_think_tag(&text) } ] })]
+                }
                 MessageContent::Text(text) => vec![json!({
                     "role": role,
                     "content": [
@@ -363,7 +371,9 @@ fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Resu
                         "content": content,
                     })]
                 }
-                MessageContent::ToolResults((tool_results, text)) => {
+                MessageContent::ToolCalls(MessageContentToolCalls {
+                    tool_results, text, ..
+                }) => {
                     let mut assistant_parts = vec![];
                     let mut user_parts = vec![];
                     if !text.is_empty() {
@@ -456,12 +466,22 @@ fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Resu
 }
 
 fn extract_chat_completions(data: &Value) -> Result<ChatCompletionsOutput> {
-    let mut texts = vec![];
+    let mut text = String::new();
+    let mut reasoning = None;
     let mut tool_calls = vec![];
     if let Some(array) = data["output"]["message"]["content"].as_array() {
         for item in array {
-            if let Some(text) = item["text"].as_str() {
-                texts.push(text);
+            if let Some(v) = item["text"].as_str() {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(v);
+            } else if let Some(reasoning_text) =
+                item["reasoningContent"]["reasoningText"].as_object()
+            {
+                if let Some(text) = json_str_from_map(reasoning_text, "text") {
+                    reasoning = Some(text.to_string());
+                }
             } else if let Some(tool_use) = item["toolUse"].as_object() {
                 if let (Some(id), Some(name), Some(input)) = (
                     json_str_from_map(tool_use, "toolUseId"),
@@ -478,12 +498,16 @@ fn extract_chat_completions(data: &Value) -> Result<ChatCompletionsOutput> {
         }
     }
 
-    if texts.is_empty() && tool_calls.is_empty() {
+    if let Some(reasoning) = reasoning {
+        text = format!("<think>\n{reasoning}\n</think>\n\n{text}")
+    }
+
+    if text.is_empty() && tool_calls.is_empty() {
         bail!("Invalid response data: {data}");
     }
 
     let output = ChatCompletionsOutput {
-        text: texts.join("\n\n"),
+        text,
         tool_calls,
         id: None,
         input_tokens: data["usage"]["inputTokens"].as_u64(),

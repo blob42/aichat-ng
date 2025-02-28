@@ -1,4 +1,6 @@
-use super::ToolResults;
+use super::Model;
+
+use crate::{function::ToolResult, multiline_text, utils::dimmed_text};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,25 +24,28 @@ impl Message {
         Self { role, content }
     }
 
-    pub fn merge_system(&mut self, system: &str) {
-        match &mut self.content {
-            MessageContent::Text(text) => {
+    pub fn merge_system(&mut self, system: MessageContent) {
+        match (&mut self.content, system) {
+            (MessageContent::Text(text), MessageContent::Text(system_text)) => {
                 self.content = MessageContent::Array(vec![
-                    MessageContentPart::Text {
-                        text: system.to_string(),
-                    },
+                    MessageContentPart::Text { text: system_text },
                     MessageContentPart::Text {
                         text: text.to_string(),
                     },
-                ]);
+                ])
             }
-            MessageContent::Array(list) => {
-                list.insert(
-                    0,
-                    MessageContentPart::Text {
-                        text: system.to_string(),
-                    },
-                );
+            (MessageContent::Array(list), MessageContent::Text(system_text)) => {
+                list.insert(0, MessageContentPart::Text { text: system_text })
+            }
+            (MessageContent::Text(text), MessageContent::Array(mut system_list)) => {
+                system_list.push(MessageContentPart::Text {
+                    text: text.to_string(),
+                });
+                self.content = MessageContent::Array(system_list);
+            }
+            (MessageContent::Array(list), MessageContent::Array(mut system_list)) => {
+                system_list.append(list);
+                self.content = MessageContent::Array(system_list);
             }
             _ => {}
         }
@@ -53,6 +58,7 @@ pub enum MessageRole {
     System,
     Assistant,
     User,
+    Tool,
 }
 
 #[allow(dead_code)]
@@ -64,6 +70,10 @@ impl MessageRole {
     pub fn is_user(&self) -> bool {
         matches!(self, MessageRole::User)
     }
+
+    pub fn is_assistant(&self) -> bool {
+        matches!(self, MessageRole::Assistant)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -72,13 +82,17 @@ pub enum MessageContent {
     Text(String),
     Array(Vec<MessageContentPart>),
     // Note: This type is primarily for convenience and does not exist in OpenAI's API.
-    ToolResults(ToolResults),
+    ToolCalls(MessageContentToolCalls),
 }
 
 impl MessageContent {
-    pub fn render_input(&self, resolve_url_fn: impl Fn(&str) -> String) -> String {
+    pub fn render_input(
+        &self,
+        resolve_url_fn: impl Fn(&str) -> String,
+        agent_info: &Option<(String, Vec<String>)>,
+    ) -> String {
         match self {
-            MessageContent::Text(text) => text.to_string(),
+            MessageContent::Text(text) => multiline_text(text),
             MessageContent::Array(list) => {
                 let (mut concated_text, mut files) = (String::new(), vec![]);
                 for item in list {
@@ -92,11 +106,30 @@ impl MessageContent {
                     }
                 }
                 if !concated_text.is_empty() {
-                    concated_text = format!(" -- {concated_text}")
+                    concated_text = format!(" -- {}", multiline_text(&concated_text))
                 }
                 format!(".file {}{}", files.join(" "), concated_text)
             }
-            MessageContent::ToolResults(_) => String::new(),
+            MessageContent::ToolCalls(MessageContentToolCalls {
+                tool_results, text, ..
+            }) => {
+                let mut lines = vec![];
+                if !text.is_empty() {
+                    lines.push(text.clone())
+                }
+                for tool_result in tool_results {
+                    let mut parts = vec!["Call".to_string()];
+                    if let Some((agent_name, functions)) = agent_info {
+                        if functions.contains(&tool_result.call.name) {
+                            parts.push(agent_name.clone())
+                        }
+                    }
+                    parts.push(tool_result.call.name.clone());
+                    parts.push(tool_result.call.arguments.to_string());
+                    lines.push(dimmed_text(&parts.join(" ")));
+                }
+                lines.join("\n")
+            }
         }
     }
 
@@ -112,7 +145,7 @@ impl MessageContent {
                     *text = replace_fn(text)
                 }
             }
-            MessageContent::ToolResults(_) => {}
+            MessageContent::ToolCalls(_) => {}
         }
     }
 
@@ -128,7 +161,7 @@ impl MessageContent {
                 }
                 parts.join("\n\n")
             }
-            MessageContent::ToolResults(_) => String::new(),
+            MessageContent::ToolCalls(_) => String::new(),
         }
     }
 }
@@ -145,13 +178,50 @@ pub struct ImageUrl {
     pub url: String,
 }
 
-pub fn patch_system_message(messages: &mut Vec<Message>) {
-    if messages[0].role.is_system() {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MessageContentToolCalls {
+    pub tool_results: Vec<ToolResult>,
+    pub text: String,
+    pub sequence: bool,
+}
+
+impl MessageContentToolCalls {
+    pub fn new(tool_results: Vec<ToolResult>, text: String) -> Self {
+        Self {
+            tool_results,
+            text,
+            sequence: false,
+        }
+    }
+
+    pub fn merge(&mut self, tool_results: Vec<ToolResult>, _text: String) {
+        self.tool_results.extend(tool_results);
+        self.text.clear();
+        self.sequence = true;
+    }
+}
+
+pub fn patch_messages(messages: &mut Vec<Message>, model: &Model) {
+    if messages.is_empty() {
+        return;
+    }
+    if let Some(prefix) = model.system_prompt_prefix() {
+        if messages[0].role.is_system() {
+            messages[0].merge_system(MessageContent::Text(prefix.to_string()));
+        } else {
+            messages.insert(
+                0,
+                Message {
+                    role: MessageRole::System,
+                    content: MessageContent::Text(prefix.to_string()),
+                },
+            );
+        }
+    }
+    if model.no_system_message() && messages[0].role.is_system() {
         let system_message = messages.remove(0);
-        if let (Some(message), MessageContent::Text(system)) =
-            (messages.get_mut(0), system_message.content)
-        {
-            message.merge_system(&system);
+        if let (Some(message), system) = (messages.get_mut(0), system_message.content) {
+            message.merge_system(system);
         }
     }
 }

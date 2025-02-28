@@ -4,7 +4,7 @@ set -e
 # @meta dotenv
 # @env DRY_RUN Dry run mode
 
-# @cmd Test first running
+# @cmd Test configuration initialization
 # @env AICHAT_CONFIG_DIR=tmp/test-init-config
 # @arg args~
 test-init-config() {
@@ -17,16 +17,19 @@ test-init-config() {
     cargo run -- "$@"
 }
 
-# @cmd Test running with AICHAT_PLATFORM environment variable
-# @env AICHAT_PLATFORM!
+# @cmd Test running without configuration file
+# @env AICHAT_PROVIDER!
+# @env AICHAT_CONFIG_DIR=tmp/test-provider-env
 # @arg args~
-test-platform-env() {
+test-no-config() {
+    mkdir -p "$AICHAT_CONFIG_DIR"
+    rm -rf "$AICHAT_CONFIG_DIR/config.yaml"
     cargo run -- "$@"
 }
 
 # @cmd Test function calling
-# @option --model[?`_choice_model`]
-# @option --preset[=default|weather|multi-weathers]
+# @option -m --model[?`_choice_model`]
+# @option -p --preset[=weather|multi-weathers]
 # @flag -S --no-stream
 # @arg text~
 test-function-calling() {
@@ -78,51 +81,29 @@ test-server() {
     "$@"
 }
 
-OPENAI_COMPATIBLE_PLATFORMS=( \
-  openai,gpt-4o-mini,https://api.openai.com/v1 \
-  ai21,jamba-1.5-mini,https://api.ai21.com/studio/v1 \
-  cloudflare,@cf/meta/llama-3.1-8b-instruct, \
-  deepinfra,meta-llama/Meta-Llama-3.1-8B-Instruct,https://api.deepinfra.com/v1/openai \
-  deepseek,deepseek-chat,https://api.deepseek.com \
-  fireworks,accounts/fireworks/models/llama-v3p1-8b-instruct,https://api.fireworks.ai/inference/v1 \
-  github,gpt-4o-mini,https://models.inference.ai.azure.com \
-  groq,llama3-8b-8192,https://api.groq.com/openai/v1 \
-  huggingface,meta-llama/Meta-Llama-3-8B-Instruct,https://api-inference.huggingface.co/v1 \
-  lingyiwanwu,yi-large,https://api.lingyiwanwu.com/v1 \
-  mistral,open-mistral-nemo,https://api.mistral.ai/v1 \
-  moonshot,moonshot-v1-8k,https://api.moonshot.cn/v1 \
-  openrouter,openai/gpt-4o-mini,https://openrouter.ai/api/v1 \
-  ollama,llama3.1:latest,http://localhost:11434/v1 \
-  perplexity,llama-3.1-8b-instruct,https://api.perplexity.ai \
-  qianwen,qwen-turbo,https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  siliconflow,meta-llama/Meta-Llama-3.1-8B-Instruct,https://api.siliconflow.cn/v1 \
-  together,meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo,https://api.together.xyz/v1 \
-  zhipuai,glm-4-0520,https://open.bigmodel.cn/api/paas/v4 \
-)
-
 # @cmd Chat with any LLM api 
 # @flag -S --no-stream
-# @arg platform_model![?`_choice_platform_model`]
+# @arg provider_model![?`_choice_provider_model`]
 # @arg text~
 chat() {
-    if [[ "$argc_platform_model" == *':'* ]]; then
-        model="${argc_platform_model##*:}"
-        argc_platform="${argc_platform_model%:*}"
+    if [[ "$argc_provider_model" == *':'* ]]; then
+        model="${argc_provider_model##*:}"
+        argc_provider="${argc_provider_model%:*}"
     else
-        argc_platform="${argc_platform_model}"
+        argc_provider="${argc_provider_model}"
     fi
-    for platform_config in "${OPENAI_COMPATIBLE_PLATFORMS[@]}"; do
-        if [[ "$argc_platform" == "${platform_config%%,*}" ]]; then
+    for provider_config in "${OPENAI_COMPATIBLE_PROVIDERS[@]}"; do
+        if [[ "$argc_provider" == "${provider_config%%,*}" ]]; then
             _retrieve_api_base
             break
         fi
     done
     if [[ -n "$api_base" ]]; then
-        env_prefix="$(echo "$argc_platform" | tr '[:lower:]' '[:upper:]')"
+        env_prefix="$(echo "$argc_provider" | tr '[:lower:]' '[:upper:]')"
         api_key_env="${env_prefix}_API_KEY"
         api_key="${!api_key_env}" 
         if [[ -z "$model" ]]; then
-            model="$(echo "$platform_config" | cut -d, -f2)"
+            model="$(echo "$provider_config" | cut -d, -f2)"
         fi
         if [[ -z "$model" ]]; then
             model_env="${env_prefix}_MODEL"
@@ -134,26 +115,48 @@ chat() {
             --model "$model" \
             "${argc_text[@]}"
     else
-        argc chat-$argc_platform "${argc_text[@]}"
+        argc chat-$argc_provider "${argc_text[@]}"
     fi
 }
 
 # @cmd List models by openai-compatible api
-# @arg platform![`_choice_platform`]
+# @flag --name-only Print model name only
+# @arg provider![`_choice_provider`]
 models() {
-    for platform_config in "${OPENAI_COMPATIBLE_PLATFORMS[@]}"; do
-        if [[ "$argc_platform" == "${platform_config%%,*}" ]]; then
+    for provider_config in "${OPENAI_COMPATIBLE_PROVIDERS[@]}"; do
+        if [[ "$argc_provider" == "${provider_config%%,*}" ]]; then
             _retrieve_api_base
             break
         fi
     done
     if [[ -n "$api_base" ]]; then
-        env_prefix="$(echo "$argc_platform" | tr '[:lower:]' '[:upper:]')"
+        env_prefix="$(echo "$argc_provider" | tr '[:lower:]' '[:upper:]')"
         api_key_env="${env_prefix}_API_KEY"
         api_key="${!api_key_env}" 
-        _retrieve_models
+        jq_args=()
+        if [[ -n "$argc_name_only" ]]; then
+            case "$argc_provider" in
+                cloudflare)
+                    jq_args+=(-r '.result[].name')
+                    ;;
+                github)
+                    jq_args+=(-r '.[].name')
+                    ;;
+                *)
+                    jq_args+=(-r '.data[].id')
+                    ;;
+            esac
+        fi
+        _openai_compatible_models | jq "${jq_args[@]}"
     else
-        argc models-$argc_platform
+        if ! cat "$0" | grep -q "^models-$argc_provider"; then
+            _die "error: provider '$argc_provider' does not have a models api"
+        fi
+        cli_args=()
+        if [[ -n "$argc_name_only" ]]; then
+            cli_args+=(--name-only)
+        fi
+        argc models-$argc_provider "${cli_args[@]}"
     fi
 }
 
@@ -174,8 +177,13 @@ chat-openai-compatible() {
 # @cmd List models by openai-compatible api
 # @option --api-base! $$
 # @option --api-key! $$
+# @flag --name-only Print model name only
 models-openai-compatible() {
-    _retrieve_models
+    jq_args=()
+    if [[ -n "$argc_name_only" ]]; then
+        jq_args+=(-r '.data[].id')
+    fi
+    _openai_compatible_models | jq "${jq_args[@]}"
 }
 
 # @cmd Chat with azure-openai api
@@ -194,7 +202,7 @@ chat-azure-openai() {
 
 # @cmd Chat with gemini api
 # @env GEMINI_API_KEY!
-# @option -m --model=gemini-1.0-pro-latest $GEMINI_MODEL
+# @option -m --model=gemini-1.5-pro-latest $GEMINI_MODEL
 # @flag -S --no-stream
 # @arg text~
 chat-gemini() {
@@ -210,10 +218,15 @@ chat-gemini() {
 
 # @cmd List gemini models
 # @env GEMINI_API_KEY!
+# @flag --name-only Print model name only
 models-gemini() {
-    _wrapper curl "https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}" \
+    jq_args=()
+    if [[ -n "$argc_name_only" ]]; then
+        jq_args+=(-r '.models[].name')
+    fi
+    _wrapper curl -fsSL "https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}" \
 -H 'Content-Type: application/json' \
-
+    | jq "${jq_args[@]}"
 }
 
 # @cmd Chat with claude api
@@ -231,13 +244,28 @@ chat-claude() {
 -d "$(_build_body claude "$@")"
 }
 
+# @cmd List claude models
+# @env CLAUDE_API_KEY!
+# @flag --name-only Print model name only
+models-claude() {
+    jq_args=()
+    if [[ -n "$argc_name_only" ]]; then
+        jq_args+=(-r '.data[].id')
+    fi
+    _wrapper curl -fsSL "https://api.anthropic.com/v1/models" \
+-H 'Content-Type: application/json' \
+-H 'anthropic-version: 2023-06-01' \
+-H "x-api-key: $CLAUDE_API_KEY" \
+    | jq "${jq_args[@]}"
+}
+
 # @cmd Chat with cohere api
 # @env COHERE_API_KEY!
-# @option -m --model=command-r $COHERE_MODEL
+# @option -m --model=command-r-08-2024 $COHERE_MODEL
 # @flag -S --no-stream
 # @arg text~
 chat-cohere() {
-    _wrapper curl -i https://api.cohere.ai/v1/chat \
+    _wrapper curl -i https://api.cohere.ai/v2/chat \
 -X POST \
 -H 'Content-Type: application/json' \
 -H "Authorization: Bearer $COHERE_API_KEY" \
@@ -246,17 +274,22 @@ chat-cohere() {
 
 # @cmd List cohere models
 # @env COHERE_API_KEY!
+# @flag --name-only Print model name only
 models-cohere() {
-    _wrapper curl https://api.cohere.ai/v1/models \
+    jq_args=()
+    if [[ -n "$argc_name_only" ]]; then
+        jq_args+=(-r '.models[].name')
+    fi
+    _wrapper curl -fsSL https://api.cohere.ai/v1/models \
 -H "Authorization: Bearer $COHERE_API_KEY" \
-
+    | jq "${jq_args[@]}"
 }
 
 # @cmd Chat with vertexai api
 # @env require-tools gcloud
 # @env VERTEXAI_PROJECT_ID!
 # @env VERTEXAI_LOCATION!
-# @option -m --model=gemini-1.0-pro $VERTEXAI_GEMINI_MODEL
+# @option -m --model=gemini-1.5-flash-002 $VERTEXAI_GEMINI_MODEL
 # @flag -S --no-stream
 # @arg text~
 chat-vertexai() {
@@ -273,43 +306,54 @@ chat-vertexai() {
 -d "$(_build_body vertexai "$@")" 
 }
 
-# @cmd Chat with ernie api
-# @meta require-tools jq
-# @env ERNIE_API_KEY!
-# @option -m --model=ernie-tiny-8k $ERNIE_MODEL
-# @flag -S --no-stream
-# @arg text~
-chat-ernie() {
-    auth_url="https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id=$ERNIE_API_KEY&client_secret=$ERNIE_SECRET_KEY"
-    ACCESS_TOKEN="$(curl -fsSL "$auth_url" | jq -r '.access_token')"
-    url="https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat/$argc_model?access_token=$ACCESS_TOKEN"
-    _wrapper curl -i "$url" \
--X POST \
--d "$(_build_body ernie "$@")"
-}
-
 _argc_before() {
+    OPENAI_COMPATIBLE_PROVIDERS=( \
+        openai,gpt-4o-mini,https://api.openai.com/v1 \
+        ai21,jamba-1.5-mini,https://api.ai21.com/studio/v1 \
+        cloudflare,@cf/meta/llama-3.1-8b-instruct,https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1 \
+        deepinfra,meta-llama/Meta-Llama-3.1-8B-Instruct,https://api.deepinfra.com/v1/openai \
+        deepseek,deepseek-chat,https://api.deepseek.com \
+        ernie,ernie-4.0-turbo-8k-latest,https://qianfan.baidubce.com/v2 \
+        github,gpt-4o-mini,https://models.inference.ai.azure.com \
+        groq,llama-3.1-8b-instant,https://api.groq.com/openai/v1 \
+        hunyuan,hunyuan-large,https://api.hunyuan.cloud.tencent.com/v1 \
+        lingyiwanwu,yi-lightning,https://api.lingyiwanwu.com/v1 \
+        minimax,MiniMax-Text-01,https://api.minimax.chat/v1 \
+        mistral,mistral-small-latest,https://api.mistral.ai/v1 \
+        moonshot,moonshot-v1-8k,https://api.moonshot.cn/v1 \
+        openrouter,openai/gpt-4o-mini,https://openrouter.ai/api/v1 \
+        perplexity,llama-3.1-8b-instruct,https://api.perplexity.ai \
+        qianwen,qwen-turbo-latest,https://dashscope.aliyuncs.com/compatible-mode/v1 \
+        xai,grok-beta,https://api.x.ai/v1 \
+        zhipuai,glm-4-0520,https://open.bigmodel.cn/api/paas/v4 \
+    )
+
     stream="true"
     if [[ -n "$argc_no_stream" ]]; then
         stream="false"
     fi
 }
 
-_retrieve_models() {
+_openai_compatible_models() {
     api_base="${api_base:-"$argc_api_base"}"
     api_key="${api_key:-"$argc_api_key"}"
-    _wrapper curl "$api_base/models" \
+    url="${api_base}/models"
+    if [[ "$argc_provider" == "cloudflare" ]]; then
+        url="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/models/search"
+    fi
+
+    _wrapper curl -fsSL "$url" \
 -H "Authorization: Bearer $api_key" \
 
 }
 
 _retrieve_api_base() {
-    api_base="${platform_config##*,}"
+    api_base="${provider_config##*,}"
     if [[ -z "$api_base" ]]; then
-        key="$(echo $argc_platform |  tr '[:lower:]' '[:upper:]')_API_BASE"
+        key="$(echo $argc_provider |  tr '[:lower:]' '[:upper:]')_API_BASE"
         api_base="${!key}"
         if [[ -z "$api_base" ]]; then
-            _die "Miss api_base for $argc_platform; please set $key"
+            _die "error: miss api_base for $argc_provider; please set $key"
         fi
     fi
 }
@@ -318,23 +362,23 @@ _choice_model() {
     aichat --list-models
 }
 
-_choice_platform_model() {
-    _choice_platform
+_choice_provider_model() {
+    _choice_provider
     _choice_model
 }
 
-_choice_platform() {
+_choice_provider() {
     _choice_client
-    _choice_openai_compatible_platform
+    _choice_openai_compatible_provider
 }
 
 _choice_client() {
-    printf "%s\n" openai gemini claude cohere ollama azure-openai vertexai bedrock cloudflare ernie qianwen moonshot
+    printf "%s\n" gemini claude cohere azure-openai vertexai bedrock
 }
 
-_choice_openai_compatible_platform() {
-    for platform_config in "${OPENAI_COMPATIBLE_PLATFORMS[@]}"; do
-        echo "${platform_config%%,*}"
+_choice_openai_compatible_provider() {
+    for provider_config in "${OPENAI_COMPATIBLE_PROVIDERS[@]}"; do
+        echo "${provider_config%%,*}"
     done
 }
 
@@ -352,7 +396,7 @@ _build_body() {
     else
         shift
         case "$kind" in
-        openai)
+        openai|cohere)
             echo '{
     "model": "'$argc_model'",
     "messages": [
@@ -362,13 +406,6 @@ _build_body() {
         }
     ],
     "stream": '$stream'
-}'
-            ;;
-        cohere)
-            echo '{
-  "model": "'$argc_model'",
-  "message": "'"$*"'",
-  "stream": '$stream'
 }'
             ;;
         claude)
@@ -398,19 +435,8 @@ _build_body() {
     "safetySettings":[{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_ONLY_HIGH"},{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_ONLY_HIGH"},{"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"BLOCK_ONLY_HIGH"},{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_ONLY_HIGH"}]
 }'
             ;;
-        ernie)
-            echo '{
-    "messages": [
-        {
-            "role": "user",
-            "content": "'"$*"'"
-        }
-    ],
-    "stream": '$stream'
-}'
-            ;;
         *)
-            _die "Unsupported build body for $kind"
+            _die "error: unsupported build body for $kind"
             ;;
         esac
 
@@ -419,7 +445,7 @@ _build_body() {
 
 _wrapper() {
     if [[ "$DRY_RUN" == "true" ]] || [[ "$DRY_RUN" == "1" ]]; then
-        echo "$@"
+        echo "$@" >&2
     else
         "$@"
     fi

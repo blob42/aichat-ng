@@ -21,18 +21,7 @@ impl OpenAICompatibleClient {
     config_get_fn!(api_base, get_api_base);
     config_get_fn!(api_key, get_api_key);
 
-    pub const PROMPTS: [PromptAction<'static>; 5] = [
-        ("name", "Platform Name:", true, PromptKind::String),
-        ("api_base", "API Base:", true, PromptKind::String),
-        ("api_key", "API Key:", false, PromptKind::String),
-        ("models[].name", "Model Name:", true, PromptKind::String),
-        (
-            "models[].max_input_tokens",
-            "Max Input Tokens:",
-            false,
-            PromptKind::Integer,
-        ),
-    ];
+    pub const PROMPTS: [PromptAction<'static>; 0] = [];
 }
 
 impl_client_trait!(
@@ -90,7 +79,11 @@ fn prepare_rerank(self_: &OpenAICompatibleClient, data: &RerankData) -> Result<R
     let api_key = self_.get_api_key().ok();
     let api_base = get_api_base_ext(self_)?;
 
-    let url = format!("{api_base}/rerank");
+    let url = if self_.name().starts_with("ernie") {
+        format!("{api_base}/rerankers")
+    } else {
+        format!("{api_base}/rerank")
+    };
 
     let body = generic_build_rerank_body(data, &self_.model);
 
@@ -107,7 +100,7 @@ fn get_api_base_ext(self_: &OpenAICompatibleClient) -> Result<String> {
     let api_base = match self_.get_api_base() {
         Ok(v) => v,
         Err(err) => {
-            match OPENAI_COMPATIBLE_PLATFORMS
+            match OPENAI_COMPATIBLE_PROVIDERS
                 .into_iter()
                 .find_map(|(name, api_base)| {
                     if name == self_.model.client_name() {
@@ -156,11 +149,11 @@ pub fn generic_build_rerank_body(data: &RerankData, model: &Model) -> Value {
     } = data;
 
     let mut body = json!({
-        "model": model.name(),
+        "model": model.real_name(),
         "query": query,
         "documents": documents,
     });
-    if model.client_name() == "voyageai" {
+    if model.client_name().starts_with("voyageai") {
         body["top_k"] = (*top_n).into()
     } else {
         body["top_n"] = (*top_n).into()

@@ -1,12 +1,10 @@
 use super::{MarkdownRender, SseEvent};
 
-use crate::utils::{create_spinner, AbortSignal, Spinner};
+use crate::utils::{poll_abort_signal, spawn_spinner, AbortSignal, Spinner};
 
 use anyhow::Result;
 use crossterm::{
-    cursor,
-    event::{self, Event, KeyCode, KeyModifiers},
-    queue, style,
+    cursor, queue, style,
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use std::{
@@ -19,13 +17,13 @@ use tokio::sync::mpsc::UnboundedReceiver;
 pub async fn markdown_stream(
     rx: UnboundedReceiver<SseEvent>,
     render: &mut MarkdownRender,
-    abort: &AbortSignal,
-    spin: bool,
+    abort_signal: &AbortSignal,
+    spin: bool
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
 
-    let ret = markdown_stream_inner(rx, render, abort, &mut stdout, spin).await;
+    let ret = markdown_stream_inner(rx, render, abort_signal, &mut stdout, spin).await;
 
     disable_raw_mode()?;
 
@@ -35,9 +33,12 @@ pub async fn markdown_stream(
     ret
 }
 
-pub async fn raw_stream(mut rx: UnboundedReceiver<SseEvent>, abort: &AbortSignal) -> Result<()> {
+pub async fn raw_stream(
+    mut rx: UnboundedReceiver<SseEvent>,
+    abort_signal: &AbortSignal,
+) -> Result<()> {
     loop {
-        if abort.aborted() {
+        if abort_signal.aborted() {
             return Ok(());
         }
         if let Some(evt) = rx.recv().await {
@@ -58,7 +59,7 @@ pub async fn raw_stream(mut rx: UnboundedReceiver<SseEvent>, abort: &AbortSignal
 async fn markdown_stream_inner(
     mut rx: UnboundedReceiver<SseEvent>,
     render: &mut MarkdownRender,
-    abort: &AbortSignal,
+    abort_signal: &AbortSignal,
     writer: &mut Stdout,
     spin: bool,
 ) -> Result<()> {
@@ -69,11 +70,11 @@ async fn markdown_stream_inner(
 
     let mut spinner: Option<Spinner> = None;
     if spin {
-        spinner = Some(create_spinner("Generating").await); 
+        spinner = Some(spawn_spinner("Generating")); 
     }
 
     'outer: loop {
-        if abort.aborted() {
+        if abort_signal.aborted() {
             return Ok(());
         }
         for reply_event in gather_events(&mut rx).await {
@@ -146,20 +147,8 @@ async fn markdown_stream_inner(
             }
         }
 
-        if crossterm::event::poll(Duration::from_millis(25))? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                        abort.set_ctrlc();
-                        break;
-                    }
-                    KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
-                        abort.set_ctrld();
-                        break;
-                    }
-                    _ => {}
-                }
-            }
+        if poll_abort_signal(abort_signal)? {
+            break;
         }
     }
 
@@ -220,5 +209,5 @@ fn split_line_tail(text: &str) -> (&str, &str) {
 
 fn need_rows(text: &str, columns: u16) -> u16 {
     let buffer_width = display_width(text).max(1) as u16;
-    (buffer_width + columns - 1) / columns
+    buffer_width.div_ceil(columns)
 }
