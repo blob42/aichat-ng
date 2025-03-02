@@ -6,12 +6,15 @@ AIChat is an all-in-one LLM CLI tool featuring Shell Assistant, CMD & REPL Mode,
 This is a fork of [aichat](https://github.com/sigoden/aichat) with the following improvements:
 
 - Edit last the response from LLMs using `edit last` command. Similar to oobabooga and open-webui. 
+- Disable the terminal spinner animation which is CPU intensive. see
+`repl_spinner` option in `config.example.yaml`.
 
 ## Install
 
 ### Package Managers
 
 - **Rust Developers:** clone this repo and  run `cargo install --path .`
+- **Arch Linux**: Available on AUR repository as aichat-ng
 
 ## Features
 
