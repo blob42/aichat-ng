@@ -12,6 +12,7 @@ use crate::config::{
     StateFlags,
 };
 use crate::render::render_error;
+use crate::run_command;
 use crate::utils::{
     abortable_run_with_spinner, create_abort_signal, dimmed_text, set_text, temp_file, AbortSignal,
 };
@@ -29,7 +30,7 @@ use std::{env, fs, process};
 const MENU_NAME: &str = "completion_menu";
 
 lazy_static::lazy_static! {
-    static ref REPL_COMMANDS: [ReplCommand; 36] = [
+    static ref REPL_COMMANDS: [ReplCommand; 37] = [
         ReplCommand::new(".help", "Show this help guide", AssertState::pass()),
         ReplCommand::new(".info", "Show system info", AssertState::pass()),
         ReplCommand::new(".edit config", "Modify configuration file", AssertState::False(StateFlags::AGENT)),
@@ -517,20 +518,25 @@ pub async fn run_repl_command(
                         config.write().edit_agent_config()?;
                     }
 
-                    Some(("last", _)) => {
-                        let editor = self
-                            .config
+                    Some("last") => {
+                        let editor = config
                             .read()
                             .editor()
                             .context("please setup a default editor")?;
 
-                        let (mut input, _) = match self.config.read().last_message.clone() {
+                        let LastMessage { mut input, output, .. } = match config
+                            .read()
+                            .last_message
+                            .as_ref()
+                            .filter(|v| v.continuous)
+                            .cloned()
+                        {
                             Some(v) => v,
-                            None => bail!("Unable to edit the last response"),
+                            None => bail!("Unable to regenerate the response"),
                         };
                         let temp_file = env::temp_dir()
                             .join(format!("aichat-{}.txt", chrono::Utc::now().timestamp()));
-                        let last_reply = self.config.read().last_reply().to_string();
+                        let last_reply = output;
                         fs::write(&temp_file, last_reply.as_bytes())?;
                         run_command(&editor, &[&temp_file], None)
                             .context("could not start a buffer editor")?;
@@ -541,7 +547,7 @@ pub async fn run_repl_command(
 
                         if new_reply != last_reply {
                             input.set_regenerate(Some(dbg!(new_reply)));
-                            ask(&self.config, self.abort_signal.clone(), input, true).await?;
+                            ask(config, abort_signal.clone(), input, true).await?;
                         }
                     }
                     _ => {
@@ -650,7 +656,7 @@ pub async fn run_repl_command(
                     Some(v) => v,
                     None => bail!("Unable to regenerate the response"),
                 };
-                input.set_regenerate();
+                input.set_regenerate(None);
                 ask(config, abort_signal.clone(), input, true).await?;
             }
             ".set" => match args {

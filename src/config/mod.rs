@@ -2048,6 +2048,7 @@ impl Config {
         output: &str,
         tool_results: &[ToolResult],
     ) -> Result<()> {
+        let mut output = output.to_string();
         if output.is_empty() || !tool_results.is_empty() {
             self.last_message = None;
             return Ok(());
