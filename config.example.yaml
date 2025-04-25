@@ -72,7 +72,7 @@ document_loaders:
 # ---- apperence ----
 highlight: true                  # Controls syntax highlighting
 light_theme: false               # Activates a light color theme when true. env: AICHAT_LIGHT_THEME
-repl_spinner: true               # set to false to disable the spinner animation
+repl_spinner: true               # Set to false to disable spinner animations
 # Custom REPL left/right prompts, see https://github.com/sigoden/aichat/wiki/Custom-REPL-Prompt for more details
 left_prompt:
   '{color.green}{?session {?agent {agent}>}{session}{?role /}}{!session {?agent {agent}>}}{role}{?rag @{rag}}{color.cyan}{?session )}{!session >}{color.reset} '
@@ -121,6 +121,16 @@ clients:
     organization_id: org-xxx                          # Optional
 
   # For any platform compatible with OpenAI's API
+
+  # See https://docs.mistral.ai/
+  - type: openai-compatible
+    name: mistral
+    api_base: https://api.mistral.ai/v1
+    api_key: xxx
+
+  # This uses the OpenAI compatibility for Ollama. Be advised that many ollama
+  # parameters are not yet implemented, use the dedicated Ollama type
+  # instead
   - type: openai-compatible
     name: ollama
     api_base: http://localhost:11434/v1
@@ -162,11 +172,6 @@ clients:
     api_base: https://api.anthropic.com/v1            # Optional
     api_key: xxx
 
-  # See https://docs.mistral.ai/
-  - type: openai-compatible
-    name: mistral
-    api_base: https://api.mistral.ai/v1
-    api_key: xxx
 
   # See https://docs.x.ai/docs
   - type: openai-compatible
@@ -196,6 +201,19 @@ clients:
     name: groq
     api_base: https://api.groq.com/openai/v1
     api_key: xxx
+
+
+
+  # See https://github.com/jmorganca/ollama
+  - type: ollama
+    api_base: http://localhost:11434                  # ENV: {client}_API_BASE
+    api_auth: Basic xxx                               # ENV: {client}_API_AUTH
+    models:                                           # Required
+      - name: llama3
+        max_input_tokens: 8192
+      - name: all-minilm:l6-v2
+        type: embedding
+        max_chunk_size: 1000
 
   # See https://learn.microsoft.com/en-us/azure/ai-services/openai/chatgpt-quickstart
   - type: azure-openai
