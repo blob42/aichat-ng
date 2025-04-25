@@ -12,10 +12,9 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use dirs::home_dir;
+use std::sync::LazyLock;
 
-lazy_static::lazy_static! {
-    pub static ref SHELL: Shell = detect_shell();
-}
+pub static SHELL: LazyLock<Shell> = LazyLock::new(detect_shell);
 
 pub struct Shell {
     pub name: String,
@@ -183,8 +182,14 @@ pub fn append_to_shell_history(shell: &str, command: &str, exit_code: i32) -> io
 
 fn get_history_file(shell: &str) -> Option<PathBuf> {
     match shell {
-        "bash" | "sh" => Some(home_dir()?.join(".bash_history")),
-        "zsh" => Some(home_dir()?.join(".zsh_history")),
+        "bash" | "sh" => env::var("HISTFILE")
+            .ok()
+            .map(PathBuf::from)
+            .or(Some(home_dir()?.join(".bash_history"))),
+        "zsh" => env::var("HISTFILE")
+            .ok()
+            .map(PathBuf::from)
+            .or(Some(home_dir()?.join(".zsh_history"))),
         "nushell" => Some(dirs::config_dir()?.join("nushell").join("history.txt")),
         "fish" => Some(
             home_dir()?

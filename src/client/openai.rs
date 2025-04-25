@@ -110,6 +110,9 @@ pub async fn openai_chat_completions_streaming(
     let handle = |message: SseMmessage| -> Result<bool> {
         if message.data == "[DONE]" {
             if !function_name.is_empty() {
+                if function_arguments.is_empty() {
+                    function_arguments = String::from("{}");
+                }
                 let arguments: Value = function_arguments.parse().with_context(|| {
                     format!("Tool call '{function_name}' have non-JSON arguments '{function_arguments}'")
                 })?;
@@ -150,9 +153,16 @@ pub async fn openai_chat_completions_streaming(
                 .as_str()
                 .filter(|v| !v.is_empty()),
         ) {
+            if reasoning_state == 1 {
+                handler.text("\n</think>\n\n")?;
+                reasoning_state = 0;
+            }
             let maybe_call_id = format!("{}/{}", id.unwrap_or_default(), index.unwrap_or_default());
             if maybe_call_id != call_id && maybe_call_id.len() >= call_id.len() {
                 if !function_name.is_empty() {
+                    if function_arguments.is_empty() {
+                        function_arguments = String::from("{}");
+                    }
                     let arguments: Value = function_arguments.parse().with_context(|| {
                         format!("Tool call '{function_name}' have non-JSON arguments '{function_arguments}'")
                     })?;
