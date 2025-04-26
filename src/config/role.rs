@@ -3,8 +3,8 @@ use super::*;
 use crate::client::{Message, MessageContent, MessageRole, Model};
 
 use anyhow::Result;
-use input::Regenerate;
 use fancy_regex::Regex;
+use input::Regenerate;
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

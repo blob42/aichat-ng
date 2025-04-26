@@ -18,7 +18,7 @@ pub async fn markdown_stream(
     rx: UnboundedReceiver<SseEvent>,
     render: &mut MarkdownRender,
     abort_signal: &AbortSignal,
-    spin: bool
+    spin: bool,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -70,7 +70,7 @@ async fn markdown_stream_inner(
 
     let mut spinner: Option<Spinner> = None;
     if spin {
-        spinner = Some(spawn_spinner("Generating")); 
+        spinner = Some(spawn_spinner("Generating"));
     }
 
     'outer: loop {

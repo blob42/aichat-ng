@@ -25,8 +25,8 @@ use reedline::{
     ReedlineEvent, ReedlineMenu, ValidationResult, Validator, Vi,
 };
 use reedline::{MenuBuilder, Signal};
-use std::{env, fs, process};
 use std::sync::LazyLock;
+use std::{env, fs, process};
 
 const MENU_NAME: &str = "completion_menu";
 
@@ -537,7 +537,9 @@ pub async fn run_repl_command(
                             .editor()
                             .context("please setup a default editor")?;
 
-                        let LastMessage { mut input, output, .. } = match config
+                        let LastMessage {
+                            mut input, output, ..
+                        } = match config
                             .read()
                             .last_message
                             .as_ref()
