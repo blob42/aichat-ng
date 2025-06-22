@@ -15,8 +15,11 @@ instead of the non-complete OpenAI compatibility version.
 
 ### Package Managers
 
-- **Rust Developers:** clone this repo and  run `cargo install --path .`
-- **Arch Linux**: Available on AUR repository as aichat-ng
+- **Arch Linux**: Available on [AUR repository](https://aur.archlinux.org/packages/aichat-ng)
+
+### From Source
+
+- **Rust Developers:** clone this repo and run `cargo install --path .`
 
 ## Features
 
