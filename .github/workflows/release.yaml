@@ -145,17 +145,17 @@ jobs:
         files: ${{ steps.package.outputs.archive }}
         prerelease: ${{ steps.check-tag.outputs.rc == 'true' }}
 
-  publish-crate:
-    name: Publish to crates.io
-    if: ${{ needs.release.outputs.rc == 'false' }}
-    runs-on: ubuntu-latest
-    needs: release
-    steps:
-      - uses: actions/checkout@v4
+  #publish-crate:
+  #  name: Publish to crates.io
+  #  if: ${{ needs.release.outputs.rc == 'false' }}
+  #  runs-on: ubuntu-latest
+  #  needs: release
+  #  steps:
+  #    - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+  #    - uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
-        run: cargo publish
+  #    - name: Publish
+  #      env:
+  #        CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
+  #      run: cargo publish
