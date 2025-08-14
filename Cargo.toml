@@ -1,6 +1,6 @@
 [package]
 name = "aichat-ng"
-version = "0.30.0"
+version = "0.31.0"
 edition = "2021"
 authors = ["blob42 <contact@blob42.xyz>"]
 description = "All-in-one AI CLI Tool"
