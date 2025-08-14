@@ -6,6 +6,7 @@ AIChat is an all-in-one LLM CLI tool featuring Shell Assistant, CMD & REPL Mode,
 This is a fork ([why?](#why-fork)) of [aichat](https://github.com/sigoden/aichat) with the following improvements:
 
 - Edit last the response from LLMs using `edit last` command. Similar to oobabooga and open-webui. 
+- Auto complete file system paths after commands that accept paths like `.file ..`
 - Ollama: reimplemented dedicated Ollama model type with full support for Ollama API
 instead of the non-complete OpenAI compatibility version.
 - Disable the terminal spinner animation which is CPU intensive. see
@@ -60,6 +61,8 @@ Accept diverse input forms such as stdin, local files and directories, and remot
 | Remote URLs       | `aichat -f https://example.com`      | `.file https://example.com`      |
 | External commands | ```aichat -f '`git diff`'```         | ```.file `git diff` ```          |
 | Combine Inputs    | `aichat -f dir/ -f data.txt explain` | `.file dir/ data.txt -- explain` |
+
+- The autocomplete menu will appear for local file system paths as you type
 
 ### Role
 

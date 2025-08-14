@@ -2,8 +2,9 @@ use super::{ReplCommand, REPL_COMMANDS};
 
 use crate::{config::GlobalConfig, utils::fuzzy_filter};
 
+use dirs::home_dir;
 use reedline::{Completer, Span, Suggestion};
-use std::collections::HashMap;
+use std::{collections::HashMap, fs::DirEntry, path::{Component, PathBuf}};
 
 impl Completer for ReplCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
@@ -13,6 +14,8 @@ impl Completer for ReplCompleter {
         if parts.is_empty() {
             return suggestions;
         }
+
+        // ::: is a multiline indicator
         if parts[0].0 == r#":::"# {
             parts.remove(0);
         }
@@ -26,6 +29,7 @@ impl Completer for ReplCompleter {
         if !cmd.starts_with('.') {
             return suggestions;
         }
+
 
         let state = self.config.read().state();
 
@@ -47,6 +51,12 @@ impl Completer for ReplCompleter {
 
         if parts_len > 1 {
             let span = Span::new(parts[parts_len - 1].1, pos);
+
+            let cur_token = parts[parts_len - 1].0;
+            if let Some(path) = looks_like_path(cur_token) {
+                return path_suggestions(path, span);
+            }
+
             let args_line = &line[parts[1].1..];
             let args: Vec<&str> = parts.iter().skip(1).map(|(v, _)| *v).collect();
             suggestions.extend(
@@ -61,6 +71,7 @@ impl Completer for ReplCompleter {
             )
         }
 
+        // show default completion menu
         if suggestions.is_empty() {
             let span = Span::new(cmd_start, pos);
             suggestions.extend(commands.iter().map(|cmd| {
@@ -124,6 +135,68 @@ fn create_suggestion(value: &str, description: &str, span: Span) -> Suggestion {
     }
 }
 
+fn path_suggestions(mut path: PathBuf, span: Span) -> Vec<Suggestion> {
+    let mut results = vec![];
+
+    if path.is_file() {
+        if let Some(p) = path.to_str() {
+            results.push(create_suggestion(p, "", span));
+        }
+        return results;
+    };
+
+    let mut remainder: Option<Component> = None;
+    let path_copy = path.clone();
+
+    if path_copy.components().count() > 1 && !path.exists() {
+        remainder = path_copy.components().next_back();
+        path.pop();
+    }
+
+
+    debug!("last component: {:?}", remainder);
+    if path.is_dir() {
+        if let Ok(entries) = path.read_dir(){
+            results.extend(entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| remainder.is_none() || is_last_comp_match(entry, &remainder))
+                .map(|entry| {
+                    create_suggestion(
+                        entry.path().to_str().expect("invalid path"),
+                        "",
+                        span
+                    )
+                })
+            );
+        }
+    }
+    results
+}
+
+// checks if last component of dir entry starts with a test component 
+fn is_last_comp_match(entry: &DirEntry, remainder: &Option<Component>) -> bool {
+    if let Some(remainder_comp) = remainder {
+        if let Some(entry_comp) = entry.path().components().next_back() {
+            let remainder_str = remainder_comp.as_os_str().to_str().unwrap_or("");
+            let entry_str = entry_comp.as_os_str().to_str().unwrap_or("");
+            return entry_str.starts_with(remainder_str);
+        }
+    }
+    true
+}
+
+fn looks_like_path(tok: &str) -> Option<PathBuf> {
+    if tok.starts_with("../") || tok.starts_with("./") || 
+        tok.starts_with("/") || tok.starts_with("~/") {
+        let homedir = home_dir().expect("reading homedir").to_str().unwrap().to_owned();
+        Some(PathBuf::from(tok.replace("~", &homedir)))
+    } else {
+        None
+    }
+} 
+
+
+
 fn split_line(line: &str) -> Vec<(&str, usize)> {
     let mut parts = vec![];
     let mut part_start = None;
@@ -144,6 +217,7 @@ fn split_line(line: &str) -> Vec<(&str, usize)> {
     }
     parts
 }
+
 
 #[test]
 fn test_split_line() {
