@@ -25,7 +25,7 @@ instead of the non-complete OpenAI compatibility version.
 
 ### Multi-Providers
 
-Integrate seamlessly with over 20 leading LLM providers through a unified interface. Supported providers include OpenAI, Claude, Gemini (Google AI Studio), Ollama, Groq, Azure-OpenAI, VertexAI, Bedrock, Github Models, Mistral, Deepseek, AI21, XAI Grok, Cohere, Perplexity, Cloudflare, OpenRouter, Ernie, Qianwen, Moonshot, ZhipuAI, Lingyiwanwu, MiniMax, Deepinfra, VoyageAI, any OpenAI-Compatible API provider.
+Integrate seamlessly with over 20 leading LLM providers through a unified interface. Supported providers include OpenAI, Claude, Gemini (Google AI Studio), Ollama, Groq, Azure-OpenAI, VertexAI, Bedrock, Github Models, Mistral, Deepseek, AI21, XAI Grok, Cohere, Perplexity, Cloudflare, OpenRouter, Ernie, Qianwen, Moonshot, ZhipuAI, MiniMax, Deepinfra, VoyageAI, any OpenAI-Compatible API provider.
 
 ### CMD Mode
 
@@ -102,7 +102,7 @@ Function calling supercharges LLMs by connecting them to external tools and data
 
 We have created a new repository [https://github.com/sigoden/llm-functions](https://github.com/sigoden/llm-functions) to help you make the most of this feature.
 
-#### AI Tools
+#### AI Tools & MCP
 
 Integrate external tools to automate tasks, retrieve information, and perform actions directly within your workflow.
 

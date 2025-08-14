@@ -252,6 +252,7 @@ clients:
     access_key_id: xxx
     secret_access_key: xxx
     region: xxx
+    session_token: xxx  # Optional, only needed for temporary credentials
 
   # See https://developers.cloudflare.com/workers-ai/
   - type: openai-compatible
@@ -293,12 +294,6 @@ clients:
   - type: openai-compatible
     name: zhipuai
     api_base: https://open.bigmodel.cn/api/paas/v4
-    api_key: xxx
-
-  # See https://platform.lingyiwanwu.com/docs
-  - type: openai-compatible
-    name: lingyiwanwu
-    api_base: https://api.lingyiwanwu.com/v1
     api_key: xxx
 
   # See https://platform.minimaxi.com/document/Fast%20access

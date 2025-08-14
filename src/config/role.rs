@@ -27,11 +27,10 @@ static RE_METADATA: LazyLock<Regex> =
 pub trait RoleLike {
     fn to_role(&self) -> Role;
     fn model(&self) -> &Model;
-    fn model_mut(&mut self) -> &mut Model;
     fn temperature(&self) -> Option<f64>;
     fn top_p(&self) -> Option<f64>;
     fn use_tools(&self) -> Option<String>;
-    fn set_model(&mut self, model: &Model);
+    fn set_model(&mut self, model: Model);
     fn set_temperature(&mut self, value: Option<f64>);
     fn set_top_p(&mut self, value: Option<f64>);
     fn set_use_tools(&mut self, value: Option<String>);
@@ -119,16 +118,16 @@ impl Role {
     pub fn export(&self) -> String {
         let mut metadata = vec![];
         if let Some(model) = self.model_id() {
-            metadata.push(format!("model: {}", model));
+            metadata.push(format!("model: {model}"));
         }
         if let Some(temperature) = self.temperature() {
-            metadata.push(format!("temperature: {}", temperature));
+            metadata.push(format!("temperature: {temperature}"));
         }
         if let Some(top_p) = self.top_p() {
-            metadata.push(format!("top_p: {}", top_p));
+            metadata.push(format!("top_p: {top_p}"));
         }
         if let Some(use_tools) = self.use_tools() {
-            metadata.push(format!("use_tools: {}", use_tools));
+            metadata.push(format!("use_tools: {use_tools}"));
         }
         if metadata.is_empty() {
             format!("{}\n", self.prompt)
@@ -177,7 +176,7 @@ impl Role {
         top_p: Option<f64>,
         use_tools: Option<String>,
     ) {
-        self.set_model(model);
+        self.set_model(model.clone());
         if temperature.is_some() {
             self.set_temperature(temperature);
         }
@@ -276,10 +275,6 @@ impl RoleLike for Role {
         &self.model
     }
 
-    fn model_mut(&mut self) -> &mut Model {
-        &mut self.model
-    }
-
     fn temperature(&self) -> Option<f64> {
         self.temperature
     }
@@ -292,11 +287,11 @@ impl RoleLike for Role {
         self.use_tools.clone()
     }
 
-    fn set_model(&mut self, model: &Model) {
+    fn set_model(&mut self, model: Model) {
         if !self.model().id().is_empty() {
             self.model_id = Some(model.id().to_string());
         }
-        self.model = model.clone();
+        self.model = model;
     }
 
     fn set_temperature(&mut self, value: Option<f64>) {

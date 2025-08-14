@@ -19,6 +19,7 @@ pub struct BedrockConfig {
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
     pub region: Option<String>,
+    pub session_token: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelData>,
     pub patch: Option<RequestPatch>,
@@ -29,6 +30,7 @@ impl BedrockClient {
     config_get_fn!(access_key_id, get_access_key_id);
     config_get_fn!(secret_access_key, get_secret_access_key);
     config_get_fn!(region, get_region);
+    config_get_fn!(session_token, get_session_token);
 
     pub const PROMPTS: [PromptAction<'static>; 3] = [
         ("access_key_id", "AWS Access Key ID", None),
@@ -44,6 +46,7 @@ impl BedrockClient {
         let access_key_id = self.get_access_key_id()?;
         let secret_access_key = self.get_secret_access_key()?;
         let region = self.get_region()?;
+        let session_token = self.get_session_token().ok();
         let host = format!("bedrock-runtime.{region}.amazonaws.com");
 
         let model_name = &self.model.real_name();
@@ -70,6 +73,7 @@ impl BedrockClient {
                 access_key_id,
                 secret_access_key,
                 region,
+                session_token,
             },
             AwsRequest {
                 method: Method::POST,
@@ -93,6 +97,7 @@ impl BedrockClient {
         let access_key_id = self.get_access_key_id()?;
         let secret_access_key = self.get_secret_access_key()?;
         let region = self.get_region()?;
+        let session_token = self.get_session_token().ok();
         let host = format!("bedrock-runtime.{region}.amazonaws.com");
 
         let uri = format!("/model/{}/invoke", self.model.real_name());
@@ -121,6 +126,7 @@ impl BedrockClient {
                 access_key_id,
                 secret_access_key,
                 region,
+                session_token,
             },
             AwsRequest {
                 method: Method::POST,
@@ -527,6 +533,7 @@ struct AwsCredentials {
     access_key_id: String,
     secret_access_key: String,
     region: String,
+    session_token: Option<String>,
 }
 
 #[derive(Debug)]
@@ -556,17 +563,20 @@ fn aws_fetch(
     } = request;
     let region = &credentials.region;
 
-    let endpoint = format!("https://{}{}", host, uri);
+    let endpoint = format!("https://{host}{uri}");
 
     let now: DateTime<Utc> = Utc::now();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = amz_date[0..8].to_string();
     headers.insert("host".into(), host.clone());
     headers.insert("x-amz-date".into(), amz_date.clone());
+    if let Some(token) = credentials.session_token.clone() {
+        headers.insert("x-amz-security-token".into(), token);
+    }
 
     let canonical_headers = headers
         .iter()
-        .map(|(key, value)| format!("{}:{}\n", key, value))
+        .map(|(key, value)| format!("{key}:{value}\n"))
         .collect::<Vec<_>>()
         .join("");
 
@@ -589,7 +599,7 @@ fn aws_fetch(
     );
 
     let algorithm = "AWS4-HMAC-SHA256";
-    let credential_scope = format!("{}/{}/{}/aws4_request", date_stamp, region, service);
+    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
     let string_to_sign = format!(
         "{}\n{}\n{}\n{}",
         algorithm,
@@ -626,7 +636,7 @@ fn aws_fetch(
 }
 
 fn gen_signing_key(key: &str, date_stamp: &str, region: &str, service: &str) -> Vec<u8> {
-    let k_date = hmac_sha256(format!("AWS4{}", key).as_bytes(), date_stamp);
+    let k_date = hmac_sha256(format!("AWS4{key}").as_bytes(), date_stamp);
     let k_region = hmac_sha256(&k_date, region);
     let k_service = hmac_sha256(&k_region, service);
     hmac_sha256(&k_service, "aws4_request")

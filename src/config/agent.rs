@@ -62,7 +62,15 @@ impl Agent {
             let config = config.read();
             match agent_config.model_id.as_ref() {
                 Some(model_id) => Model::retrieve_model(&config, model_id, ModelType::Chat)?,
-                None => config.current_model().clone(),
+                None => {
+                    if agent_config.temperature.is_none() {
+                        agent_config.temperature = config.temperature;
+                    }
+                    if agent_config.top_p.is_none() {
+                        agent_config.top_p = config.top_p;
+                    }
+                    config.current_model().clone()
+                }
             }
         };
 
@@ -328,10 +336,6 @@ impl RoleLike for Agent {
         &self.model
     }
 
-    fn model_mut(&mut self) -> &mut Model {
-        &mut self.model
-    }
-
     fn temperature(&self) -> Option<f64> {
         self.config.temperature
     }
@@ -344,9 +348,9 @@ impl RoleLike for Agent {
         self.config.use_tools.clone()
     }
 
-    fn set_model(&mut self, model: &Model) {
+    fn set_model(&mut self, model: Model) {
         self.config.model_id = Some(model.id());
-        self.model = model.clone();
+        self.model = model;
     }
 
     fn set_temperature(&mut self, value: Option<f64>) {

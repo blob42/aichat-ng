@@ -274,7 +274,7 @@ Type ".help" for additional help.
         let cursor_config = CursorConfig {
             vi_insert: Some(SetCursorStyle::BlinkingBar),
             vi_normal: Some(SetCursorStyle::SteadyBlock),
-            emacs: Some(SetCursorStyle::SteadyBlock),
+            emacs: None,
         };
         let mut editor = Reedline::create()
             .with_completer(Box::new(completer))
@@ -316,15 +316,18 @@ Type ".help" for additional help.
             KeyCode::Enter,
             ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
         );
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('j'),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        );
     }
 
     fn create_edit_mode(config: &GlobalConfig) -> Box<dyn EditMode> {
         let edit_mode: Box<dyn EditMode> = if config.read().keybindings == "vi" {
-            let mut normal_keybindings = default_vi_normal_keybindings();
             let mut insert_keybindings = default_vi_insert_keybindings();
-            Self::extra_keybindings(&mut normal_keybindings);
             Self::extra_keybindings(&mut insert_keybindings);
-            Box::new(Vi::new(insert_keybindings, normal_keybindings))
+            Box::new(Vi::new(insert_keybindings, default_vi_normal_keybindings()))
         } else {
             let mut keybindings = default_emacs_keybindings();
             Self::extra_keybindings(&mut keybindings);
@@ -392,24 +395,24 @@ pub async fn run_repl_command(
             ".info" => match args {
                 Some("role") => {
                     let info = config.read().role_info()?;
-                    print!("{}", info);
+                    print!("{info}");
                 }
                 Some("session") => {
                     let info = config.read().session_info()?;
-                    print!("{}", info);
+                    print!("{info}");
                 }
                 Some("rag") => {
                     let info = config.read().rag_info()?;
-                    print!("{}", info);
+                    print!("{info}");
                 }
                 Some("agent") => {
                     let info = config.read().agent_info()?;
-                    print!("{}", info);
+                    print!("{info}");
                 }
                 Some(_) => unknown_command()?,
                 None => {
                     let output = config.read().sysinfo()?;
-                    print!("{}", output);
+                    print!("{output}");
                 }
             },
             ".model" => match args {
@@ -493,7 +496,7 @@ pub async fn run_repl_command(
                     }
                     match text {
                         Some(text) => {
-                            println!("{}", dimmed_text(&format!(">> {}", text)));
+                            println!("{}", dimmed_text(&format!(">> {text}")));
                             let input = Input::from_str(config, &text, None);
                             ask(config, abort_signal.clone(), input, true).await?;
                         }
@@ -611,7 +614,7 @@ pub async fn run_repl_command(
             ".sources" => match args {
                 Some("rag") => {
                     let output = Config::rag_sources(config)?;
-                    println!("{}", output);
+                    println!("{output}");
                 }
                 _ => {
                     println!(r#"Usage: .sources rag"#)
@@ -703,7 +706,7 @@ pub async fn run_repl_command(
                     .read()
                     .last_message
                     .as_ref()
-                    .filter(|v| v.continuous && !v.output.is_empty())
+                    .filter(|v| !v.output.is_empty())
                     .map(|v| v.output.clone())
                 {
                     Some(v) => v,
