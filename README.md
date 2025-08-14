@@ -3,7 +3,7 @@
 
 AIChat is an all-in-one LLM CLI tool featuring Shell Assistant, CMD & REPL Mode, RAG, AI Tools & Agents, and More. 
 
-This is a fork of [aichat](https://github.com/sigoden/aichat) with the following improvements:
+This is a fork ([why?](#why-fork)) of [aichat](https://github.com/sigoden/aichat) with the following improvements:
 
 - Edit last the response from LLMs using `edit last` command. Similar to oobabooga and open-webui. 
 - Ollama: reimplemented dedicated Ollama model type with full support for Ollama API
@@ -15,6 +15,7 @@ instead of the non-complete OpenAI compatibility version.
 
 ### Package Managers
 
+- **Rust Developers:** `cargo install aichat-ng`
 - **Arch Linux**: Available on [AUR repository](https://aur.archlinux.org/packages/aichat-ng)
 
 ### From Source
@@ -25,7 +26,7 @@ instead of the non-complete OpenAI compatibility version.
 
 ### Multi-Providers
 
-Integrate seamlessly with over 20 leading LLM providers through a unified interface. Supported providers include OpenAI, Claude, Gemini (Google AI Studio), Ollama, Groq, Azure-OpenAI, VertexAI, Bedrock, Github Models, Mistral, Deepseek, AI21, XAI Grok, Cohere, Perplexity, Cloudflare, OpenRouter, Ernie, Qianwen, Moonshot, ZhipuAI, MiniMax, Deepinfra, VoyageAI, any OpenAI-Compatible API provider.
+Integrate seamlessly with over 20 leading LLM providers through a unified interface. Supported providers include OpenAI, Claude, Gemini (Google AI Studio), Ollama, Groq, Azure-OpenAI, VertexAI, Bedrock, Github Models, Mistral, Deepseek, AI21, XAI Grok, Cohere, Perplexity, Cloudflare, OpenRouter, Ernie, Qianwen, Moonshot, ZhipuAI, Lingyiwanwu, MiniMax, Deepinfra, VoyageAI, any OpenAI-Compatible API provider.
 
 ### CMD Mode
 
@@ -82,14 +83,6 @@ Streamline repetitive tasks by combining a series of REPL commands into a custom
 
 ![aichat-macro](https://github.com/user-attachments/assets/23c2a08f-5bd7-4bf3-817c-c484aa74a651)
 
-### Edit LLM Answers
-
-You can edit the last LLM response using the command `.edit last` .
-
-This will open your $EDITOR/$VISUAL ( or the editor you have setup in the config ) pre filled with the last LLM reply. If you edit and save the reply it will regenerate the answer using your modification as prefix to the LLM reply.
-
-You can use this feature to steer the LLM replies. This is similar to the feature `edit` feature in **text-generation-webui** or **open-webui**. 
-
 ### RAG
 
 Integrate external documents into your LLM conversations for more accurate and contextually relevant responses.
@@ -102,7 +95,7 @@ Function calling supercharges LLMs by connecting them to external tools and data
 
 We have created a new repository [https://github.com/sigoden/llm-functions](https://github.com/sigoden/llm-functions) to help you make the most of this feature.
 
-#### AI Tools & MCP
+#### AI Tools
 
 Integrate external tools to automate tasks, retrieve information, and perform actions directly within your workflow.
 
@@ -171,6 +164,15 @@ AIChat supports custom dark and light themes, which highlight response text and 
 - [Custom Theme](https://github.com/sigoden/aichat/wiki/Custom-Theme)
 - [Custom REPL Prompt](https://github.com/sigoden/aichat/wiki/Custom-REPL-Prompt)
 - [FAQ](https://github.com/sigoden/aichat/wiki/FAQ)
+
+## Why Fork
+
+Every time I suggested a modification or submitted a PR to the original author,
+it was declined or turned down with minimal justification. In my opinion, open
+source thrives on collaboration, so this fork not only incorporates those
+enhancements but welcomes any reasonable proposals that don't compromise the
+codebase. Full credit remains due to the original author's contributions, yet
+the derived work within this repository is exclusively licensed under AGPLv3.
 
 ## License
 
