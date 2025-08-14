@@ -154,7 +154,6 @@ fn path_suggestions(mut path: PathBuf, span: Span) -> Vec<Suggestion> {
     }
 
 
-    debug!("last component: {:?}", remainder);
     if path.is_dir() {
         if let Ok(entries) = path.read_dir(){
             results.extend(entries
