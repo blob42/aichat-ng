@@ -4,7 +4,11 @@ use crate::{config::GlobalConfig, utils::fuzzy_filter};
 
 use dirs::home_dir;
 use reedline::{Completer, Span, Suggestion};
-use std::{collections::HashMap, fs::DirEntry, path::{Component, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs::DirEntry,
+    path::{Component, PathBuf},
+};
 
 impl Completer for ReplCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
@@ -29,7 +33,6 @@ impl Completer for ReplCompleter {
         if !cmd.starts_with('.') {
             return suggestions;
         }
-
 
         let state = self.config.read().state();
 
@@ -153,26 +156,22 @@ fn path_suggestions(mut path: PathBuf, span: Span) -> Vec<Suggestion> {
         path.pop();
     }
 
-
     if path.is_dir() {
-        if let Ok(entries) = path.read_dir(){
-            results.extend(entries
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| remainder.is_none() || is_last_comp_match(entry, &remainder))
-                .map(|entry| {
-                    create_suggestion(
-                        entry.path().to_str().expect("invalid path"),
-                        "",
-                        span
-                    )
-                })
+        if let Ok(entries) = path.read_dir() {
+            results.extend(
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| remainder.is_none() || is_last_comp_match(entry, &remainder))
+                    .map(|entry| {
+                        create_suggestion(entry.path().to_str().expect("invalid path"), "", span)
+                    }),
             );
         }
     }
     results
 }
 
-// checks if last component of dir entry starts with a test component 
+// checks if last component of dir entry starts with a test component
 fn is_last_comp_match(entry: &DirEntry, remainder: &Option<Component>) -> bool {
     if let Some(remainder_comp) = remainder {
         if let Some(entry_comp) = entry.path().components().next_back() {
@@ -185,16 +184,21 @@ fn is_last_comp_match(entry: &DirEntry, remainder: &Option<Component>) -> bool {
 }
 
 fn looks_like_path(tok: &str) -> Option<PathBuf> {
-    if tok.starts_with("../") || tok.starts_with("./") || 
-        tok.starts_with("/") || tok.starts_with("~/") {
-        let homedir = home_dir().expect("reading homedir").to_str().unwrap().to_owned();
+    if tok.starts_with("../")
+        || tok.starts_with("./")
+        || tok.starts_with("/")
+        || tok.starts_with("~/")
+    {
+        let homedir = home_dir()
+            .expect("reading homedir")
+            .to_str()
+            .unwrap()
+            .to_owned();
         Some(PathBuf::from(tok.replace("~", &homedir)))
     } else {
         None
     }
-} 
-
-
+}
 
 fn split_line(line: &str) -> Vec<(&str, usize)> {
     let mut parts = vec![];
@@ -216,7 +220,6 @@ fn split_line(line: &str) -> Vec<(&str, usize)> {
     }
     parts
 }
-
 
 #[test]
 fn test_split_line() {
