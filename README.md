@@ -19,9 +19,20 @@ instead of the non-complete OpenAI compatibility version.
 - **Rust Developers:** `cargo install aichat-ng`
 - **Arch Linux**: Available on [AUR repository](https://aur.archlinux.org/packages/aichat-ng)
 
+### Pre-built Binaries
+
+Download pre-built binaries for macOS, Linux, and Windows from [GitHub Releases](https://github.com/blob42/aichat-ng/releases), extract them, and add the `aichat` binary to your `$PATH`.
+
 ### From Source
 
 - **Rust Developers:** clone this repo and run `cargo install --path .`
+
+### Configuration
+
+- The default config directory  is ~/.config/aichat_ng or the equivalent base config dir for your platform.
+
+- You can keep using the original aichat config by creating a symlink `ln -s ~/.config/aichat ~/.config/aichat_ng`
+
 
 ## Features
 
