@@ -572,7 +572,7 @@ pub async fn run_repl_command(
                             .into();
 
                         if new_reply != last_reply {
-                            input.set_regenerate(Some(dbg!(new_reply)));
+                            input.set_regenerate(Some(new_reply));
                             ask(config, abort_signal.clone(), input, true).await?;
                         }
                     }

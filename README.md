@@ -12,8 +12,6 @@ instead of the non-complete OpenAI compatibility version.
 - Disable the terminal spinner animation which is CPU intensive. see
 `repl_spinner` option in `config.example.yaml`.
 
-Also read [about configuration changes in this fork](#configuration-changes-in-this-fork)
-
 ## Install
 
 ### Package Managers
@@ -180,12 +178,6 @@ AIChat supports custom dark and light themes, which highlight response text and 
 - [Custom Theme](https://github.com/sigoden/aichat/wiki/Custom-Theme)
 - [Custom REPL Prompt](https://github.com/sigoden/aichat/wiki/Custom-REPL-Prompt)
 - [FAQ](https://github.com/sigoden/aichat/wiki/FAQ)
-
-## Configuration Changes in This Fork
-
-### Environment
-
-In this fork, each configuration parameter has an equivalent environment variable that starts with `AICHAT_NG_` instead of `AICHAT_`. For example, if the upstream uses `AICHAT_TEMPERATURE`, this fork uses `AICHAT_NG_TEMPERATURE`.
 
 ## Why Fork
 

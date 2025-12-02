@@ -55,7 +55,7 @@ pub fn now_timestamp() -> i64 {
 }
 
 pub fn get_env_name(key: &str) -> String {
-    format!("{}_{key}", env!("CARGO_CRATE_NAME"),).to_ascii_uppercase()
+    format!("AICHAT_{key}").to_ascii_uppercase()
 }
 
 pub fn normalize_env_name(value: &str) -> String {
