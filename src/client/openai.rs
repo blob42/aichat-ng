@@ -51,7 +51,7 @@ fn prepare_chat_completions(
 
     let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
 
-    let body = openai_build_chat_completions_body(data, &self_.model);
+    let body = openai_build_chat_completions_body(data, &self_.model, true);
 
     let mut request_data = RequestData::new(url, body);
 
@@ -224,7 +224,7 @@ struct EmbeddingsResBodyEmbedding {
     embedding: Vec<f32>,
 }
 
-pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Value {
+pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Model, native_audio: bool) -> Value {
     let ChatCompletionsData {
         messages,
         temperature,
@@ -239,7 +239,12 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
         .enumerate()
         .flat_map(|(i, message)| {
             let Message { role, content } = message;
-            match content {
+            let content_value = if native_audio {
+                serialize_content_for_openai(&content)
+            } else {
+                serde_json::to_value(&content).unwrap_or_default()
+            };
+            match &content {
                 MessageContent::ToolCalls(MessageContentToolCalls {
                     tool_results,
                     text: _,
@@ -292,7 +297,6 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
                                     "tool_call_id": tool_result.call.id,
                                 })
                             ]
-
                         }).collect()
                     }
                 }
@@ -300,7 +304,7 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
                     vec![json!({ "role": role, "content": strip_think_tag(&text) }
                     )]
                 }
-                _ => vec![json!({ "role": role, "content": content })],
+                _ => vec![json!({ "role": role, "content": content_value })],
             }
         })
         .collect();
@@ -342,6 +346,82 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
             .collect();
     }
     body
+}
+
+/// Serialize MessageContent for OpenAI native format.
+/// AudioUrl -> {"type": "input_audio", "input_audio": {"data": base64, "format": fmt}}
+/// VideoUrl -> {"type": "image_url", "image_url": {"url": data_url}}
+/// Other variants use standard serde serialization.
+fn serialize_content_for_openai(content: &MessageContent) -> Value {
+    match content {
+        MessageContent::Text(text) => json!(text),
+        MessageContent::Array(parts) => {
+            let items: Vec<Value> = parts
+                .iter()
+                .map(|part| match part {
+                    MessageContentPart::Text { text } => json!({ "type": "text", "text": text }),
+                    MessageContentPart::ImageUrl { image_url } => {
+                        json!({ "type": "image_url", "image_url": { "url": image_url.url } })
+                    }
+                    MessageContentPart::AudioUrl { audio_url } => {
+                        let base64_data = extract_base64(&audio_url.url);
+                        let format = extract_audio_format(&audio_url.url, &audio_url.mime_type);
+                        json!({
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": base64_data,
+                                "format": format,
+                            },
+                        })
+                    }
+                    MessageContentPart::VideoUrl { video_url } => {
+                        json!({ "type": "image_url", "image_url": { "url": video_url.url } })
+                    }
+                })
+                .collect();
+            json!(items)
+        }
+        MessageContent::ToolCalls(_) => {
+            serde_json::to_value(content).unwrap_or_default()
+        }
+    }
+}
+
+/// Extract base64 data from a data URL (e.g., "data:audio/mpeg;base64,abc123" -> "abc123")
+fn extract_base64(url: &str) -> String {
+    if let Some(stripped) = url.strip_prefix("data:") {
+        if let Some(comma_pos) = stripped.find(',') {
+            return stripped[comma_pos + 1..].to_string();
+        }
+    }
+    url.to_string()
+}
+
+/// Extract the audio format from a data URL or mime_type (e.g., "mp3", "wav", "ogg")
+fn extract_audio_format(url: &str, mime_type: &Option<String>) -> String {
+    if let Some(mime) = mime_type {
+        return mime_to_audio_format(mime);
+    }
+    if let Some(stripped) = url.strip_prefix("data:") {
+        if let Some(semi_pos) = stripped.find(';') {
+            let type_part = &stripped[..semi_pos];
+            return mime_to_audio_format(type_part);
+        }
+    }
+    "mp3".to_string()
+}
+
+/// Convert a MIME type to an OpenAI audio format string
+fn mime_to_audio_format(mime: &str) -> String {
+    match mime {
+        "audio/mpeg" | "audio/mp3" => "mp3".to_string(),
+        "audio/wav" | "audio/x-wav" => "wav".to_string(),
+        "audio/ogg" | "audio/oga" => "ogg".to_string(),
+        "audio/flac" => "flac".to_string(),
+        "audio/m4a" | "audio/mp4" => "m4a".to_string(),
+        "audio/webm" => "webm".to_string(),
+        _ => "mp3".to_string(),
+    }
 }
 
 pub fn openai_build_embeddings_body(data: &EmbeddingsData, model: &Model) -> Value {
@@ -493,4 +573,121 @@ fn audio_mime_type(path: &std::path::Path) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod openai_audio_video_tests {
+    use super::*;
+    use crate::client::message::{MessageContent, MessageContentPart, MediaUrl};
+
+    #[test]
+    fn test_build_body_with_audio_native() {
+        let audio_url = MediaUrl {
+            url: "data:audio/mpeg;base64,abc123".to_string(),
+            mime_type: Some("audio/mpeg".to_string()),
+        };
+        let content = MessageContent::Array(vec![MessageContentPart::AudioUrl {
+            audio_url,
+        }]);
+        let value = serialize_content_for_openai(&content);
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr[0]["type"], "input_audio");
+        assert_eq!(arr[0]["input_audio"]["data"], "abc123");
+        assert_eq!(arr[0]["input_audio"]["format"], "mp3");
+    }
+
+    #[test]
+    fn test_build_body_with_audio_compatible() {
+        let audio_url = MediaUrl {
+            url: "data:audio/mpeg;base64,abc123".to_string(),
+            mime_type: Some("audio/mpeg".to_string()),
+        };
+        let content = MessageContent::Array(vec![MessageContentPart::AudioUrl {
+            audio_url,
+        }]);
+        let value = serde_json::to_value(&content).unwrap();
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr[0]["type"], "audio_url");
+        assert_eq!(
+            arr[0]["audio_url"]["url"],
+            "data:audio/mpeg;base64,abc123"
+        );
+    }
+
+    #[test]
+    fn test_extract_audio_format_variants() {
+        assert_eq!(mime_to_audio_format("audio/mpeg"), "mp3");
+        assert_eq!(mime_to_audio_format("audio/mp3"), "mp3");
+        assert_eq!(mime_to_audio_format("audio/wav"), "wav");
+        assert_eq!(mime_to_audio_format("audio/x-wav"), "wav");
+        assert_eq!(mime_to_audio_format("audio/ogg"), "ogg");
+        assert_eq!(mime_to_audio_format("audio/flac"), "flac");
+        assert_eq!(mime_to_audio_format("audio/m4a"), "m4a");
+        assert_eq!(mime_to_audio_format("audio/webm"), "webm");
+        assert_eq!(mime_to_audio_format("unknown/type"), "mp3");
+    }
+
+    #[test]
+    fn test_extract_base64() {
+        assert_eq!(extract_base64("data:audio/mpeg;base64,abc123"), "abc123");
+        assert_eq!(extract_base64("data:audio/wav;base64,xyz789"), "xyz789");
+        assert_eq!(extract_base64("not-a-data-url"), "not-a-data-url");
+    }
+
+    #[test]
+    fn test_extract_audio_format_from_url() {
+        assert_eq!(
+            extract_audio_format("data:audio/mpeg;base64,abc", &None),
+            "mp3"
+        );
+        assert_eq!(
+            extract_audio_format("data:audio/wav;base64,abc", &None),
+            "wav"
+        );
+        assert_eq!(
+            extract_audio_format("data:audio/mpeg;base64,abc", &Some("audio/flac".to_string())),
+            "flac"
+        );
+    }
+
+    #[test]
+    fn test_video_as_image_url_native() {
+        let video_url = MediaUrl {
+            url: "data:video/mp4;base64,xyz789".to_string(),
+            mime_type: Some("video/mp4".to_string()),
+        };
+        let content = MessageContent::Array(vec![MessageContentPart::VideoUrl {
+            video_url,
+        }]);
+        let value = serialize_content_for_openai(&content);
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr[0]["type"], "image_url");
+        assert_eq!(
+            arr[0]["image_url"]["url"],
+            "data:video/mp4;base64,xyz789"
+        );
+    }
+
+    #[test]
+    fn test_mixed_media_native() {
+        let parts = vec![
+            MessageContentPart::Text {
+                text: "Hello".to_string(),
+            },
+            MessageContentPart::AudioUrl {
+                audio_url: MediaUrl {
+                    url: "data:audio/mpeg;base64,abc".to_string(),
+                    mime_type: Some("audio/mpeg".to_string()),
+                },
+            },
+        ];
+        let content = MessageContent::Array(parts);
+        let value = serialize_content_for_openai(&content);
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "Hello");
+        assert_eq!(arr[1]["type"], "input_audio");
+        assert_eq!(arr[1]["input_audio"]["data"], "abc");
+        assert_eq!(arr[1]["input_audio"]["format"], "mp3");
+    }
 }

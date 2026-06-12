@@ -45,7 +45,7 @@ fn prepare_chat_completions(
 
     let url = format!("{api_base}/chat/completions");
 
-    let body = openai_build_chat_completions_body(data, &self_.model);
+    let body = openai_build_chat_completions_body(data, &self_.model, false);
 
     let mut request_data = RequestData::new(url, body);
 
