@@ -177,6 +177,23 @@ struct EmbeddingsResBody {
 }
 
 fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Result<Value> {
+    // Reject audio/video parts early before processing
+    for msg in &data.messages {
+        if let MessageContent::Array(list) = &msg.content {
+            for part in list {
+                match part {
+                    MessageContentPart::AudioUrl { .. } => {
+                        bail!("The model does not support audio input. Use a model with audio support or transcribe first.");
+                    },
+                    MessageContentPart::VideoUrl { .. } => {
+                        bail!("The model does not support video input. Use a model with video support.");
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let ChatCompletionsData {
         messages,
         temperature,
@@ -324,4 +341,66 @@ fn extract_chat_completions(data: &Value) -> Result<ChatCompletionsOutput> {
         output_tokens: data["eval_count"].as_u64(),
     };
     Ok(output)
+}
+
+#[cfg(test)]
+mod ollama_audio_video_tests {
+    use super::*;
+    use crate::client::{Message, MessageContent, MessageRole, ChatCompletionsData, Model};
+    use crate::client::message::{MediaUrl, MessageContentPart};
+
+    fn make_message(content: MessageContent) -> Message {
+        Message {
+            role: MessageRole::User,
+            content,
+        }
+    }
+
+    fn make_data(messages: Vec<Message>) -> ChatCompletionsData {
+        ChatCompletionsData {
+            messages,
+            temperature: None,
+            top_p: None,
+            functions: None,
+            stream: false,
+        }
+    }
+
+    fn make_model() -> Model {
+        Model::new("ollama", "llama3")
+    }
+
+    #[test]
+    fn test_ollama_rejects_audio() {
+        let media_url = MediaUrl {
+            url: "data:audio/mpeg;base64,fake".to_string(),
+            mime_type: Some("audio/mpeg".to_string()),
+        };
+        let msg = make_message(MessageContent::Array(vec![
+            MessageContentPart::AudioUrl { audio_url: media_url },
+        ]));
+        let data = make_data(vec![msg]);
+        let model = make_model();
+        let res = build_chat_completions_body(data, &model);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("audio"), "error should mention audio: {err}");
+    }
+
+    #[test]
+    fn test_ollama_rejects_video() {
+        let media_url = MediaUrl {
+            url: "data:video/mp4;base64,fake".to_string(),
+            mime_type: Some("video/mp4".to_string()),
+        };
+        let msg = make_message(MessageContent::Array(vec![
+            MessageContentPart::VideoUrl { video_url: media_url },
+        ]));
+        let data = make_data(vec![msg]);
+        let model = make_model();
+        let res = build_chat_completions_body(data, &model);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("video"), "error should mention video: {err}");
+    }
 }
