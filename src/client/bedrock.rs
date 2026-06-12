@@ -375,6 +375,9 @@ fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Resu
                                     network_image_urls.push(url.clone());
                                     json!({ "url": url })
                                 }
+                            },
+                            MessageContentPart::AudioUrl { .. } | MessageContentPart::VideoUrl { .. } => {
+                                unreachable!("audio/video not supported by Bedrock")
                             }
                         })
                         .collect();

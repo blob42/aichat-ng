@@ -347,6 +347,9 @@ pub fn gemini_build_chat_completions_body(
                                         json!({ "url": url })
                                     }
                                 },
+                                MessageContentPart::AudioUrl { .. } | MessageContentPart::VideoUrl { .. } => {
+                                    unreachable!("audio/video not supported by Gemini")
+                                },
                             })
                             .collect();
                         vec![json!({ "role": role, "parts": parts })]

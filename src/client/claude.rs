@@ -210,6 +210,9 @@ pub fn claude_build_chat_completions_body(
                                     network_image_urls.push(url.clone());
                                     json!({ "url": url })
                                 }
+                            },
+                            MessageContentPart::AudioUrl { .. } | MessageContentPart::VideoUrl { .. } => {
+                                unreachable!("audio/video not supported by Claude")
                             }
                         })
                         .collect();

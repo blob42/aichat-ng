@@ -249,6 +249,8 @@ impl Model {
                     .map(|v| match v {
                         MessageContentPart::Text { text } => estimate_token_length(text),
                         MessageContentPart::ImageUrl { .. } => 0,
+                        MessageContentPart::AudioUrl { .. } => 0,
+                        MessageContentPart::VideoUrl { .. } => 0,
                     })
                     .sum(),
                 MessageContent::ToolCalls(MessageContentToolCalls {

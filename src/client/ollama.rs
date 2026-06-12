@@ -216,6 +216,12 @@ fn build_chat_completions_body(data: ChatCompletionsData, model: &Model) -> Resu
                                     network_image_urls.push(url.clone());
                                 }
                             }
+                            MessageContentPart::AudioUrl { .. } => {
+                                unreachable!("audio not supported by Ollama")
+                            }
+                            MessageContentPart::VideoUrl { .. } => {
+                                unreachable!("video not supported by Ollama")
+                            }
                         }
                     }
                     let content = content.join("\n\n");

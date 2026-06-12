@@ -103,6 +103,12 @@ impl MessageContent {
                         MessageContentPart::ImageUrl { image_url } => {
                             files.push(resolve_url_fn(&image_url.url))
                         }
+                        MessageContentPart::AudioUrl { audio_url } => {
+                            files.push(resolve_url_fn(&audio_url.url))
+                        }
+                        MessageContentPart::VideoUrl { video_url } => {
+                            files.push(resolve_url_fn(&video_url.url))
+                        }
                     }
                 }
                 if !concated_text.is_empty() {
@@ -167,10 +173,19 @@ impl MessageContent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MediaUrl {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessageContentPart {
     Text { text: String },
     ImageUrl { image_url: ImageUrl },
+    AudioUrl { audio_url: MediaUrl },
+    VideoUrl { video_url: MediaUrl },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -232,4 +247,71 @@ pub fn extract_system_message(messages: &mut Vec<Message>) -> Option<String> {
         return Some(system_message.content.to_text());
     }
     None
+}
+
+#[cfg(test)]
+mod audio_video_tests {
+    use super::*;
+
+    #[test]
+    fn test_audio_url_serialization() {
+        let part = MessageContentPart::AudioUrl {
+            audio_url: MediaUrl {
+                url: "data:audio/mpeg;base64,abc123".to_string(),
+                mime_type: Some("audio/mpeg".to_string()),
+            },
+        };
+        let json = serde_json::to_value(&part).unwrap();
+        assert_eq!(json["type"], "audio_url");
+        assert_eq!(json["audio_url"]["url"], "data:audio/mpeg;base64,abc123");
+        assert_eq!(json["audio_url"]["mime_type"], "audio/mpeg");
+    }
+
+    #[test]
+    fn test_video_url_serialization() {
+        let part = MessageContentPart::VideoUrl {
+            video_url: MediaUrl {
+                url: "data:video/mp4;base64,xyz789".to_string(),
+                mime_type: Some("video/mp4".to_string()),
+            },
+        };
+        let json = serde_json::to_value(&part).unwrap();
+        assert_eq!(json["type"], "video_url");
+        assert_eq!(json["video_url"]["url"], "data:video/mp4;base64,xyz789");
+        assert_eq!(json["video_url"]["mime_type"], "video/mp4");
+    }
+
+    #[test]
+    fn test_content_to_text_ignores_media() {
+        let parts = vec![
+            MessageContentPart::Text {
+                text: "Hello world".to_string(),
+            },
+            MessageContentPart::AudioUrl {
+                audio_url: MediaUrl {
+                    url: "data:audio/mpeg;base64,abc".to_string(),
+                    mime_type: None,
+                },
+            },
+            MessageContentPart::VideoUrl {
+                video_url: MediaUrl {
+                    url: "data:video/mp4;base64,xyz".to_string(),
+                    mime_type: None,
+                },
+            },
+        ];
+        let content = MessageContent::Array(parts);
+        assert_eq!(content.to_text(), "Hello world");
+    }
+
+    #[test]
+    fn test_media_url_clone() {
+        let url = MediaUrl {
+            url: "data:audio/mpeg;base64,abc".to_string(),
+            mime_type: Some("audio/mpeg".to_string()),
+        };
+        let cloned = url.clone();
+        assert_eq!(cloned.url, url.url);
+        assert_eq!(cloned.mime_type, url.mime_type);
+    }
 }
