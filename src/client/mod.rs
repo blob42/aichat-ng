@@ -66,7 +66,9 @@ pub const OPENAI_COMPATIBLE_PROVIDERS: [(&str, &str); 18] = [
 #[cfg(test)]
 mod integration_audio_video {
     use super::*;
-    use crate::client::message::{Message, MessageContent, MessageContentPart, MessageRole, MediaUrl, ImageUrl};
+    use crate::client::message::{
+        ImageUrl, MediaUrl, Message, MessageContent, MessageContentPart, MessageRole,
+    };
     use crate::client::openai::openai_build_chat_completions_body;
 
     fn make_model(name: &str, supports_audio: bool, supports_video: bool) -> Model {
@@ -94,7 +96,9 @@ mod integration_audio_video {
             mime_type: Some("audio/mpeg".to_string()),
         };
         let content = MessageContent::Array(vec![
-            MessageContentPart::Text { text: "Transcribe this".to_string() },
+            MessageContentPart::Text {
+                text: "Transcribe this".to_string(),
+            },
             MessageContentPart::AudioUrl { audio_url },
         ]);
         let messages = vec![Message::new(MessageRole::User, content)];
@@ -118,7 +122,9 @@ mod integration_audio_video {
             mime_type: Some("audio/mpeg".to_string()),
         };
         let content = MessageContent::Array(vec![
-            MessageContentPart::Text { text: "Transcribe this".to_string() },
+            MessageContentPart::Text {
+                text: "Transcribe this".to_string(),
+            },
             MessageContentPart::AudioUrl { audio_url },
         ]);
         let messages = vec![Message::new(MessageRole::User, content)];
@@ -129,16 +135,23 @@ mod integration_audio_video {
         let content_arr = msgs[0]["content"].as_array().unwrap();
         assert_eq!(content_arr[0]["type"], "text");
         assert_eq!(content_arr[1]["type"], "audio_url");
-        assert_eq!(content_arr[1]["audio_url"]["url"], "data:audio/mpeg;base64,abc123");
+        assert_eq!(
+            content_arr[1]["audio_url"]["url"],
+            "data:audio/mpeg;base64,abc123"
+        );
     }
 
     #[test]
     fn test_full_pipeline_mixed_media() {
         let model = make_model("gpt-4o", true, true);
         let parts = vec![
-            MessageContentPart::Text { text: "Describe this".to_string() },
+            MessageContentPart::Text {
+                text: "Describe this".to_string(),
+            },
             MessageContentPart::ImageUrl {
-                image_url: ImageUrl { url: "data:image/png;base64,img123".to_string() },
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,img123".to_string(),
+                },
             },
             MessageContentPart::AudioUrl {
                 audio_url: MediaUrl {
@@ -199,7 +212,9 @@ mod integration_audio_video {
 
         // Full content roundtrip
         let content = MessageContent::Array(vec![
-            MessageContentPart::Text { text: "Hello".to_string() },
+            MessageContentPart::Text {
+                text: "Hello".to_string(),
+            },
             MessageContentPart::AudioUrl {
                 audio_url: MediaUrl {
                     url: "data:audio/mpeg;base64,abc".to_string(),

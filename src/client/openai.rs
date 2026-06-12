@@ -488,6 +488,7 @@ fn normalize_function_id(value: &str) -> Option<String> {
     }
 }
 
+// Adapted from sigoden/aichat#1508 (authored by simon3z + Claude)
 pub async fn openai_audio_transcriptions(
     self_: &OpenAIClient,
     client: &reqwest::Client,
@@ -502,6 +503,7 @@ pub async fn openai_audio_transcriptions(
         .await
 }
 
+// Adapted from sigoden/aichat#1508 (authored by simon3z + Claude)
 pub async fn openai_compatible_audio_transcriptions(
     client: &reqwest::Client,
     api_base: &str,
@@ -556,6 +558,7 @@ pub async fn openai_compatible_audio_transcriptions(
         .ok_or_else(|| anyhow::anyhow!("Invalid transcription response: {body}"))
 }
 
+// Adapted from sigoden/aichat#1508 (authored by simon3z + Claude)
 fn audio_mime_type(path: &std::path::Path) -> String {
     let ext = path
         .extension()

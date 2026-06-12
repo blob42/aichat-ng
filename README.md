@@ -60,7 +60,7 @@ Elevate your command-line efficiency. Describe your tasks in natural language, a
 
 ### Multi-Form Input
 
-Accept diverse input forms such as stdin, local files and directories, and remote URLs, allowing flexibility in data handling.
+Accept diverse input forms such as stdin, local files and directories, and remote URLs, allowing flexibility in data handling. Supports images, audio, and video files.
 
 | Input             | CMD                                  | REPL                             |
 | ----------------- | ------------------------------------ | -------------------------------- |
@@ -72,6 +72,11 @@ Accept diverse input forms such as stdin, local files and directories, and remot
 | Remote URLs       | `aichat -f https://example.com`      | `.file https://example.com`      |
 | External commands | ```aichat -f '`git diff`'```         | ```.file `git diff` ```          |
 | Combine Inputs    | `aichat -f dir/ -f data.txt explain` | `.file dir/ data.txt -- explain` |
+| Audio files       | `aichat -f recording.mp3 -- summarize` | `.file recording.mp3 -- summarize` |
+| Video files       | `aichat -f video.mp4 -- describe` | `.file video.mp4 -- describe` |
+Supported audio formats: mp3, wav, ogg, flac, m4a, webm, mp4. Video formats: mp4, webm, avi, mov, mkv.
+
+Use `.transcript <file>` to transcribe audio files to text via the transcription API.
 
 - The autocomplete menu will appear for local file system paths as you type
 

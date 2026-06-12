@@ -6,7 +6,9 @@ use self::completer::ReplCompleter;
 use self::highlighter::ReplHighlighter;
 use self::prompt::ReplPrompt;
 
-use crate::client::{call_chat_completions, call_chat_completions_streaming, init_client, TranscriptionData};
+use crate::client::{
+    call_chat_completions, call_chat_completions_streaming, init_client, TranscriptionData,
+};
 use crate::config::{
     macro_execute, AgentVariables, AssertState, Config, GlobalConfig, Input, LastMessage,
     StateFlags,
@@ -663,6 +665,7 @@ pub async fn run_repl_command(
 .file %% -- translate last reply to english"#
                 ),
             },
+            // Adapted from sigoden/aichat#1508 (authored by simon3z + Claude)
             ".transcript" => match args {
                 Some(args) => {
                     let (files, text) = split_args_text(args, cfg!(windows));
@@ -670,7 +673,11 @@ pub async fn run_repl_command(
                         println!("Usage: .transcript <audio-file> [-- <prompt>]");
                     } else {
                         let path = std::path::PathBuf::from(&files[0]);
-                        let prompt = if text.is_empty() { None } else { Some(text.to_string()) };
+                        let prompt = if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.to_string())
+                        };
                         let data = TranscriptionData { path, prompt };
                         let model = config.read().current_model().clone();
                         let client = init_client(config, Some(model))?;
@@ -682,9 +689,11 @@ pub async fn run_repl_command(
                         .await?;
                         config.read().print_markdown(&transcript)?;
                         let input = Input::from_str(config, &files[0], None);
-                        config
-                            .write()
-                            .after_chat_completion(&input, &transcript, &[] as &[ToolResult])?;
+                        config.write().after_chat_completion(
+                            &input,
+                            &transcript,
+                            &[] as &[ToolResult],
+                        )?;
                     }
                 }
                 None => println!(

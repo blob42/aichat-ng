@@ -358,11 +358,13 @@ pub struct RerankResult {
     pub relevance_score: f64,
 }
 
+// Adapted from sigoden/aichat#1508 (authored by simon3z + Claude)
 pub struct TranscriptionData {
     pub path: std::path::PathBuf,
     pub prompt: Option<String>,
 }
 
+// Adapted from sigoden/aichat#1508 (authored by simon3z + Claude)
 pub async fn noop_audio_transcriptions<T: Client>(
     _self: &T,
     _client: &ReqwestClient,

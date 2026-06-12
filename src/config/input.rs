@@ -537,9 +537,7 @@ async fn load_documents(
                 .with_context(|| format!("Unable to read media '{file_path}'"))?;
             data_urls.insert(sha256(&contents), file_path.clone());
             media_parts.push(MessageContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: contents,
-                },
+                image_url: ImageUrl { url: contents },
             })
         } else {
             let document = load_file(loaders, &file_path)
@@ -570,9 +568,7 @@ async fn load_documents(
                     },
                 },
                 MediaType::Image => MessageContentPart::ImageUrl {
-                    image_url: ImageUrl {
-                        url: contents,
-                    },
+                    image_url: ImageUrl { url: contents },
                 },
             };
             media_parts.push(part)
@@ -664,8 +660,7 @@ fn max_media_size() -> usize {
 }
 
 fn check_media_size(path: &str) -> Result<()> {
-    let metadata = std::fs::metadata(path)
-        .with_context(|| format!("Unable to access '{path}'"))?;
+    let metadata = std::fs::metadata(path).with_context(|| format!("Unable to access '{path}'"))?;
     let size = metadata.len() as usize;
     if size > max_media_size() {
         bail!(
@@ -708,7 +703,10 @@ fn read_media_to_data_url(image_path: &str) -> Result<String> {
 }
 
 fn media_type_from_mime(data_url: &str) -> MediaType {
-    if let Some(mime) = data_url.strip_prefix("data:").and_then(|s| s.split(';').next()) {
+    if let Some(mime) = data_url
+        .strip_prefix("data:")
+        .and_then(|s| s.split(';').next())
+    {
         if mime.starts_with("audio/") {
             return MediaType::Audio;
         }
@@ -847,7 +845,10 @@ mod input_audio_video_tests {
         let model = Model::new("test", "gpt-4");
         let result = input.prepare_completion_data(&model, false);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not support audio"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not support audio"));
     }
 
     #[test]
@@ -876,7 +877,10 @@ mod input_audio_video_tests {
         let model = Model::new("test", "gpt-4");
         let result = input.prepare_completion_data(&model, false);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not support video"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not support video"));
     }
 
     #[test]
@@ -936,5 +940,4 @@ mod input_audio_video_tests {
         let result = input.prepare_completion_data(&model, false);
         assert!(result.is_ok(), "should allow video when model supports it");
     }
-
 }
