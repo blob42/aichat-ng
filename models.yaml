@@ -44,6 +44,8 @@
       input_price: 2.5
       output_price: 10
       supports_vision: true
+      supports_audio: true
+      supports_video: true
       supports_function_calling: true
     - name: gpt-4-turbo
       max_input_tokens: 128000
@@ -1282,6 +1284,8 @@
       input_price: 2.5
       output_price: 10
       supports_vision: true
+      supports_audio: true
+      supports_video: true
       supports_function_calling: true
     - name: openai/gpt-oss-120b
       max_input_tokens: 131072
@@ -1649,6 +1653,8 @@
     - name: gpt-4o
       max_input_tokens: 128000
       max_output_tokens: 16384
+      supports_audio: true
+      supports_video: true
       supports_function_calling: true
     - name: text-embedding-3-large
       type: embedding

@@ -126,6 +126,11 @@ impl Model {
         &mut self.data
     }
 
+    #[allow(dead_code)]
+    pub fn supports_vision(&self) -> bool { self.data.supports_vision }
+    pub fn supports_audio(&self) -> bool { self.data.supports_audio }
+    pub fn supports_video(&self) -> bool { self.data.supports_video }
+
     pub fn description(&self) -> String {
         match self.model_type() {
             ModelType::Chat => {
@@ -135,6 +140,8 @@ impl Model {
                     input_price,
                     output_price,
                     supports_vision,
+                    supports_audio,
+                    supports_video,
                     supports_function_calling,
                     ..
                 } = &self.data;
@@ -145,6 +152,12 @@ impl Model {
                 let mut capabilities = vec![];
                 if *supports_vision {
                     capabilities.push('👁');
+                };
+                if *supports_audio {
+                    capabilities.push('🔊');
+                };
+                if *supports_video {
+                    capabilities.push('🎬');
                 };
                 if *supports_function_calling {
                     capabilities.push('⚒');
@@ -318,6 +331,10 @@ pub struct ModelData {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supports_vision: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_audio: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_video: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supports_function_calling: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     no_stream: bool,
@@ -405,5 +422,27 @@ where
     match value {
         Some(value) => value.to_string(),
         None => "-".to_string(),
+    }
+}
+
+
+#[cfg(test)]
+mod model_audio_video_tests {
+    use super::*;
+
+    #[test]
+    fn test_model_supports_audio_default() {
+        let model = Model::new("test", "model");
+        assert!(!model.supports_audio());
+        assert!(!model.supports_video());
+    }
+
+    #[test]
+    fn test_model_supports_audio_set() {
+        let mut model = Model::new("test", "model");
+        model.data_mut().supports_audio = true;
+        model.data_mut().supports_video = true;
+        assert!(model.supports_audio());
+        assert!(model.supports_video());
     }
 }
