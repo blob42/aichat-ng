@@ -1,19 +1,29 @@
 use super::*;
 
 use crate::client::{
-    init_client, patch_messages, ChatCompletionsData, Client, ImageUrl, Message, MessageContent,
-    MessageContentPart, MessageContentToolCalls, MessageRole, Model,
+    init_client, patch_messages, ChatCompletionsData, Client, ImageUrl, MediaUrl, Message,
+    MessageContent, MessageContentPart, MessageContentToolCalls, MessageRole, Model,
 };
 use crate::function::ToolResult;
 use crate::utils::{base64_encode, is_loader_protocol, sha256, AbortSignal};
 
 use anyhow::{bail, Context, Result};
 use indexmap::IndexSet;
-use std::{collections::HashMap, fs::File, io::Read};
+use std::{collections::HashMap, env, fs::File, io::Read};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const IMAGE_EXTS: [&str; 5] = ["png", "jpeg", "jpg", "webp", "gif"];
+const AUDIO_EXTS: [&str; 7] = ["mp3", "wav", "ogg", "flac", "m4a", "webm", "mp4"];
+const VIDEO_EXTS: [&str; 5] = ["mp4", "webm", "avi", "mov", "mkv"];
 const SUMMARY_MAX_WIDTH: usize = 80;
+const DEFAULT_MAX_MEDIA_SIZE_MB: usize = 25;
+
+#[derive(Debug, Clone, PartialEq)]
+enum MediaType {
+    Image,
+    Audio,
+    Video,
+}
 
 #[derive(Debug, Clone)]
 pub enum Regenerate {
@@ -33,7 +43,7 @@ pub struct Input {
     last_reply: Option<String>,
     continue_output: Option<String>,
     regenerate: Option<Regenerate>,
-    medias: Vec<String>,
+    media_parts: Vec<MessageContentPart>,
     data_urls: HashMap<String, String>,
     tool_calls: Option<MessageContentToolCalls>,
     role: Role,
@@ -53,7 +63,7 @@ impl Input {
             last_reply: None,
             continue_output: None,
             regenerate: None,
-            medias: Default::default(),
+            media_parts: Default::default(),
             data_urls: Default::default(),
             tool_calls: None,
             role,
@@ -73,7 +83,7 @@ impl Input {
         let (raw_paths, local_paths, remote_urls, external_cmds, protocol_paths, with_last_reply) =
             resolve_paths(&loaders, paths)?;
         let mut last_reply = None;
-        let (documents, medias, data_urls) = load_documents(
+        let (documents, media_parts, data_urls) = load_documents(
             &loaders,
             local_paths,
             remote_urls,
@@ -97,7 +107,7 @@ impl Input {
                     texts.push(format!("\n{v}"));
                 }
             }
-            if last_reply.is_none() && documents.is_empty() && medias.is_empty() {
+            if last_reply.is_none() && documents.is_empty() && media_parts.is_empty() {
                 bail!("No last reply found");
             }
         }
@@ -120,7 +130,7 @@ impl Input {
             last_reply,
             continue_output: None,
             regenerate: None,
-            medias,
+            media_parts,
             data_urls,
             tool_calls: Default::default(),
             role,
@@ -146,9 +156,8 @@ impl Input {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.medias.is_empty()
+        self.text.is_empty() && self.media_parts.is_empty()
     }
-
     pub fn data_urls(&self) -> HashMap<String, String> {
         self.data_urls.clone()
     }
@@ -350,7 +359,7 @@ impl Input {
 
     pub fn render(&self) -> String {
         let text = self.text();
-        if self.medias.is_empty() {
+        if self.media_parts.is_empty() {
             return text;
         }
         let tail_text = if text.is_empty() {
@@ -359,26 +368,24 @@ impl Input {
             format!(" -- {text}")
         };
         let files: Vec<String> = self
-            .medias
+            .media_parts
             .iter()
-            .cloned()
+            .map(|part| match part {
+                MessageContentPart::ImageUrl { image_url } => image_url.url.clone(),
+                MessageContentPart::AudioUrl { audio_url } => audio_url.url.clone(),
+                MessageContentPart::VideoUrl { video_url } => video_url.url.clone(),
+                MessageContentPart::Text { .. } => unreachable!(),
+            })
             .map(|url| resolve_data_url(&self.data_urls, url))
             .collect();
         format!(".file {}{}", files.join(" "), tail_text)
     }
 
     pub fn message_content(&self) -> MessageContent {
-        if self.medias.is_empty() {
+        if self.media_parts.is_empty() {
             MessageContent::Text(self.text())
         } else {
-            let mut list: Vec<MessageContentPart> = self
-                .medias
-                .iter()
-                .cloned()
-                .map(|url| MessageContentPart::ImageUrl {
-                    image_url: ImageUrl { url },
-                })
-                .collect();
+            let mut list = self.media_parts.clone();
             if !self.text.is_empty() {
                 list.insert(0, MessageContentPart::Text { text: self.text() });
             }
@@ -459,11 +466,11 @@ async fn load_documents(
     protocol_paths: Vec<String>,
 ) -> Result<(
     Vec<(&'static str, String, String)>,
-    Vec<String>,
+    Vec<MessageContentPart>,
     HashMap<String, String>,
 )> {
     let mut files = vec![];
-    let mut medias = vec![];
+    let mut media_parts = vec![];
     let mut data_urls = HashMap::new();
 
     for cmd in external_cmds {
@@ -477,11 +484,37 @@ async fn load_documents(
 
     let local_files = expand_glob_paths(&local_paths, true).await?;
     for file_path in local_files {
-        if is_image(&file_path) {
+        check_media_size(&file_path)?;
+        let media_type = detect_media_type(&file_path);
+        if media_type != MediaType::Image {
+            let (contents, part_type) = read_media_with_type(&file_path)
+                .with_context(|| format!("Unable to read media '{file_path}'"))?;
+            data_urls.insert(sha256(&contents), file_path.clone());
+            let part = match part_type {
+                MediaType::Audio => MessageContentPart::AudioUrl {
+                    audio_url: MediaUrl {
+                        url: contents,
+                        mime_type: None,
+                    },
+                },
+                MediaType::Video => MessageContentPart::VideoUrl {
+                    video_url: MediaUrl {
+                        url: contents,
+                        mime_type: None,
+                    },
+                },
+                MediaType::Image => unreachable!(),
+            };
+            media_parts.push(part)
+        } else if is_image(&file_path) {
             let contents = read_media_to_data_url(&file_path)
                 .with_context(|| format!("Unable to read media '{file_path}'"))?;
-            data_urls.insert(sha256(&contents), file_path);
-            medias.push(contents)
+            data_urls.insert(sha256(&contents), file_path.clone());
+            media_parts.push(MessageContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: contents,
+                },
+            })
         } else {
             let document = load_file(loaders, &file_path)
                 .await
@@ -495,8 +528,28 @@ async fn load_documents(
             .await
             .with_context(|| format!("Failed to load url '{file_url}'"))?;
         if extension == MEDIA_URL_EXTENSION {
-            data_urls.insert(sha256(&contents), file_url);
-            medias.push(contents)
+            data_urls.insert(sha256(&contents), file_url.clone());
+            let media_type = media_type_from_mime(&contents);
+            let part = match media_type {
+                MediaType::Audio => MessageContentPart::AudioUrl {
+                    audio_url: MediaUrl {
+                        url: contents,
+                        mime_type: None,
+                    },
+                },
+                MediaType::Video => MessageContentPart::VideoUrl {
+                    video_url: MediaUrl {
+                        url: contents,
+                        mime_type: None,
+                    },
+                },
+                MediaType::Image => MessageContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: contents,
+                    },
+                },
+            };
+            media_parts.push(part)
         } else {
             files.push(("URL", file_url, contents));
         }
@@ -512,7 +565,7 @@ async fn load_documents(
         );
     }
 
-    Ok((files, medias, data_urls))
+    Ok((files, media_parts, data_urls))
 }
 
 pub fn resolve_data_url(data_urls: &HashMap<String, String>, data_url: String) -> String {
@@ -533,6 +586,84 @@ fn is_image(path: &str) -> bool {
         .unwrap_or_default()
 }
 
+fn is_audio(path: &str) -> bool {
+    get_patch_extension(path)
+        .map(|v| AUDIO_EXTS.contains(&v.as_str()))
+        .unwrap_or_default()
+}
+
+fn is_video(path: &str) -> bool {
+    get_patch_extension(path)
+        .map(|v| VIDEO_EXTS.contains(&v.as_str()))
+        .unwrap_or_default()
+}
+
+fn detect_media_type(path: &str) -> MediaType {
+    if is_image(path) {
+        MediaType::Image
+    } else if is_audio(path) {
+        // .mp4 and .webm default to audio
+        MediaType::Audio
+    } else if is_video(path) {
+        MediaType::Video
+    } else {
+        MediaType::Image
+    }
+}
+
+fn media_mime_type(path: &str) -> &'static str {
+    match get_patch_extension(path).as_deref().unwrap_or("") {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "mp3" | "mpga" | "mpeg" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "webm" => "audio/webm",
+        "mp4" => "audio/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
+fn max_media_size() -> usize {
+    env::var(get_env_name("max_media_size_mb"))
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_MEDIA_SIZE_MB)
+        * 1024
+        * 1024
+}
+
+fn check_media_size(path: &str) -> Result<()> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("Unable to access '{path}'"))?;
+    let size = metadata.len() as usize;
+    if size > max_media_size() {
+        bail!(
+            "File '{}' is too large ({:.1}MB), max size is {}MB",
+            path,
+            size as f64 / 1024.0 / 1024.0,
+            max_media_size() / 1024 / 1024
+        )
+    }
+    Ok(())
+}
+
+fn read_media_with_type(path: &str) -> Result<(String, MediaType)> {
+    check_media_size(path)?;
+    let media_type = detect_media_type(path);
+    let mime_type = media_mime_type(path);
+    let mut file = File::open(path)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+    let encoded = base64_encode(buffer);
+    let data_url = format!("data:{mime_type};base64,{encoded}");
+    Ok((data_url, media_type))
+}
+
 fn read_media_to_data_url(image_path: &str) -> Result<String> {
     let extension = get_patch_extension(image_path).unwrap_or_default();
     let mime_type = match extension.as_str() {
@@ -545,9 +676,122 @@ fn read_media_to_data_url(image_path: &str) -> Result<String> {
     let mut file = File::open(image_path)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
-
     let encoded_image = base64_encode(buffer);
     let data_url = format!("data:{mime_type};base64,{encoded_image}");
-
     Ok(data_url)
+}
+
+fn media_type_from_mime(data_url: &str) -> MediaType {
+    if let Some(mime) = data_url.strip_prefix("data:").and_then(|s| s.split(';').next()) {
+        if mime.starts_with("audio/") {
+            return MediaType::Audio;
+        }
+        if mime.starts_with("video/") {
+            return MediaType::Video;
+        }
+        if mime.starts_with("image/") {
+            return MediaType::Image;
+        }
+    }
+    MediaType::Image
+}
+
+#[cfg(test)]
+mod input_audio_video_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_audio_extensions() {
+        assert!(is_audio("recording.mp3"));
+        assert!(is_audio("voice.wav"));
+        assert!(is_audio("song.ogg"));
+        assert!(is_audio("music.flac"));
+        assert!(is_audio("audio.m4a"));
+        assert!(is_audio("track.webm"));
+        assert!(is_audio("clip.mp4"));
+        assert!(!is_audio("photo.png"));
+        assert!(!is_audio("document.txt"));
+    }
+
+    #[test]
+    fn test_is_video_extensions() {
+        assert!(is_video("clip.mp4"));
+        assert!(is_video("screen.webm"));
+        assert!(is_video("movie.avi"));
+        assert!(is_video("video.mov"));
+        assert!(is_video("recording.mkv"));
+        assert!(!is_video("song.mp3"));
+        assert!(!is_video("photo.png"));
+    }
+
+    #[test]
+    fn test_detect_media_type() {
+        assert_eq!(detect_media_type("photo.png"), MediaType::Image);
+        assert_eq!(detect_media_type("recording.mp3"), MediaType::Audio);
+        assert_eq!(detect_media_type("movie.avi"), MediaType::Video);
+        // .mp4 and .webm default to audio
+        assert_eq!(detect_media_type("clip.mp4"), MediaType::Audio);
+        assert_eq!(detect_media_type("screen.webm"), MediaType::Audio);
+    }
+
+    #[test]
+    fn test_media_type_from_mime() {
+        assert_eq!(
+            media_type_from_mime("data:audio/mpeg;base64,abc"),
+            MediaType::Audio
+        );
+        assert_eq!(
+            media_type_from_mime("data:video/mp4;base64,xyz"),
+            MediaType::Video
+        );
+        assert_eq!(
+            media_type_from_mime("data:image/png;base64,def"),
+            MediaType::Image
+        );
+    }
+
+    #[test]
+    fn test_input_message_content_with_mixed_media() {
+        let input = Input {
+            text: "Hello world".to_string(),
+            media_parts: vec![
+                MessageContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,abc".to_string(),
+                    },
+                },
+                MessageContentPart::AudioUrl {
+                    audio_url: MediaUrl {
+                        url: "data:audio/mpeg;base64,xyz".to_string(),
+                        mime_type: None,
+                    },
+                },
+            ],
+            config: GlobalConfig::default(),
+            raw: ("Hello world".to_string(), vec![]),
+            patched_text: None,
+            last_reply: None,
+            continue_output: None,
+            regenerate: None,
+            data_urls: HashMap::new(),
+            tool_calls: None,
+            role: Role::default(),
+            rag_name: None,
+            with_session: false,
+            with_agent: false,
+        };
+        let content = input.message_content();
+        match content {
+            MessageContent::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                match &parts[0] {
+                    MessageContentPart::Text { text } => assert_eq!(text, "Hello world"),
+                    _ => panic!("Expected Text part"),
+                }
+                matches!(parts[1], MessageContentPart::ImageUrl { .. });
+                matches!(parts[2], MessageContentPart::AudioUrl { .. });
+            }
+            _ => panic!("Expected Array content"),
+        }
+    }
 }
