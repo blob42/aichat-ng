@@ -320,6 +320,23 @@ pub fn gemini_build_chat_completions_body(
 
     let system_message = extract_system_message(&mut messages);
 
+    // Reject audio/video parts early before processing
+    for msg in &messages {
+        if let MessageContent::Array(list) = &msg.content {
+            for part in list {
+                match part {
+                    MessageContentPart::AudioUrl { .. } => {
+                        bail!("The model does not support audio input. Use .transcript to transcribe first, or switch to an OpenAI model with audio support (e.g., gpt-4o).");
+                    },
+                    MessageContentPart::VideoUrl { .. } => {
+                        bail!("The model does not support video input. Switch to a model with video support.");
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let mut network_image_urls = vec![];
     let contents: Vec<Value> = messages
         .into_iter()
@@ -348,7 +365,7 @@ pub fn gemini_build_chat_completions_body(
                                     }
                                 },
                                 MessageContentPart::AudioUrl { .. } | MessageContentPart::VideoUrl { .. } => {
-                                    unreachable!("audio/video not supported by Gemini")
+                                    unreachable!("audio/video already rejected above")
                                 },
                             })
                             .collect();
@@ -536,5 +553,68 @@ fn strip_model_version(name: &str) -> &str {
     match name.split_once('@') {
         Some((v, _)) => v,
         None => name,
+    }
+}
+
+#[cfg(test)]
+mod gemini_audio_video_tests {
+    use super::*;
+    use crate::client::{Message, MessageContent, MessageRole, ChatCompletionsData, Model};
+    use crate::client::message::{MediaUrl, MessageContentPart};
+
+    fn make_message(content: MessageContent) -> Message {
+        Message {
+            role: MessageRole::User,
+            content,
+        }
+    }
+
+    fn make_model() -> Model {
+        Model::new("vertexai", "gemini-pro")
+    }
+
+    fn make_data(messages: Vec<Message>) -> ChatCompletionsData {
+        ChatCompletionsData {
+            messages,
+            temperature: None,
+            top_p: None,
+            functions: None,
+            stream: false,
+        }
+    }
+
+    #[test]
+    fn test_gemini_rejects_audio() {
+        let media_url = MediaUrl {
+            url: "data:audio/mpeg;base64,fake".to_string(),
+            mime_type: Some("audio/mpeg".to_string()),
+        };
+        let msg = make_message(MessageContent::Array(vec![
+            MessageContentPart::AudioUrl { audio_url: media_url },
+        ]));
+        let data = make_data(vec![msg]);
+        let model = make_model();
+        let res = gemini_build_chat_completions_body(data, &model);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("audio"), "error should mention audio: {err}");
+        assert!(err.contains(".transcript"), "error should suggest .transcript: {err}");
+    }
+
+    #[test]
+    fn test_gemini_rejects_video() {
+        let media_url = MediaUrl {
+            url: "data:video/mp4;base64,fake".to_string(),
+            mime_type: Some("video/mp4".to_string()),
+        };
+        let msg = make_message(MessageContent::Array(vec![
+            MessageContentPart::VideoUrl { video_url: media_url },
+        ]));
+        let data = make_data(vec![msg]);
+        let model = make_model();
+        let res = gemini_build_chat_completions_body(data, &model);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("video"), "error should mention video: {err}");
     }
 }
