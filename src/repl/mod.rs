@@ -170,7 +170,7 @@ static REPL_COMMANDS: LazyLock<[ReplCommand; 38]> = LazyLock::new(|| {
         ReplCommand::new(".macro", "Execute a macro", AssertState::pass()),
         ReplCommand::new(
             ".file",
-            "Include files, directories, URLs or commands",
+            "Include files, directories, URLs or commands (images, audio, video)",
             AssertState::pass(),
         ),
         ReplCommand::new(
@@ -656,6 +656,8 @@ pub async fn run_repl_command(
 .file src/ Cargo.toml -- analyze
 .file https://example.com/file.txt -- summarize
 .file https://example.com/image.png -- recognize text
+.file /tmp/recording.mp3 -- transcribe this
+.file /tmp/video.mp4 -- describe what happens
 .file `git diff` -- Generate git commit message
 .file jina:https://example.com
 .file %% -- translate last reply to english"#
