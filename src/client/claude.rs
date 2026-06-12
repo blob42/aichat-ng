@@ -158,6 +158,23 @@ pub fn claude_build_chat_completions_body(
     data: ChatCompletionsData,
     model: &Model,
 ) -> Result<Value> {
+    // Reject audio/video parts early before processing
+    for msg in &data.messages {
+        if let MessageContent::Array(list) = &msg.content {
+            for part in list {
+                match part {
+                    MessageContentPart::AudioUrl { .. } => {
+                        bail!("The model does not support audio input.");
+                    },
+                    MessageContentPart::VideoUrl { .. } => {
+                        bail!("The model does not support video input.");
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let ChatCompletionsData {
         mut messages,
         temperature,
@@ -299,6 +316,68 @@ pub fn claude_build_chat_completions_body(
             .collect();
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod claude_audio_video_tests {
+    use super::*;
+    use crate::client::{Message, MessageContent, MessageRole, ChatCompletionsData, Model};
+    use crate::client::message::{MediaUrl, MessageContentPart};
+
+    fn make_message(content: MessageContent) -> Message {
+        Message {
+            role: MessageRole::User,
+            content,
+        }
+    }
+
+    fn make_data(messages: Vec<Message>) -> ChatCompletionsData {
+        ChatCompletionsData {
+            messages,
+            temperature: None,
+            top_p: None,
+            functions: None,
+            stream: false,
+        }
+    }
+
+    fn make_model() -> Model {
+        Model::new("claude", "claude-3-opus")
+    }
+
+    #[test]
+    fn test_claude_rejects_audio() {
+        let media_url = MediaUrl {
+            url: "data:audio/mpeg;base64,fake".to_string(),
+            mime_type: Some("audio/mpeg".to_string()),
+        };
+        let msg = make_message(MessageContent::Array(vec![
+            MessageContentPart::AudioUrl { audio_url: media_url },
+        ]));
+        let data = make_data(vec![msg]);
+        let model = make_model();
+        let res = claude_build_chat_completions_body(data, &model);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("audio"), "error should mention audio: {err}");
+    }
+
+    #[test]
+    fn test_claude_rejects_video() {
+        let media_url = MediaUrl {
+            url: "data:video/mp4;base64,fake".to_string(),
+            mime_type: Some("video/mp4".to_string()),
+        };
+        let msg = make_message(MessageContent::Array(vec![
+            MessageContentPart::VideoUrl { video_url: media_url },
+        ]));
+        let data = make_data(vec![msg]);
+        let model = make_model();
+        let res = claude_build_chat_completions_body(data, &model);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("video"), "error should mention video: {err}");
+    }
 }
 
 pub fn claude_extract_chat_completions(data: &Value) -> Result<ChatCompletionsOutput> {
