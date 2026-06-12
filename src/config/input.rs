@@ -252,11 +252,37 @@ impl Input {
         Ok(text)
     }
 
+    fn guard_media_capabilities(&self, model: &Model) -> Result<()> {
+        for part in &self.media_parts {
+            match part {
+                MessageContentPart::AudioUrl { .. } => {
+                    if !model.supports_audio() {
+                        bail!(
+                            "Model '{}' does not support audio input. Use a model with audio support (e.g., gpt-4o) or use .transcript to transcribe first.",
+                            model.id()
+                        )
+                    }
+                }
+                MessageContentPart::VideoUrl { .. } => {
+                    if !model.supports_video() {
+                        bail!(
+                            "Model '{}' does not support video input. Use a model with video support.",
+                            model.id()
+                        )
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn prepare_completion_data(
         &self,
         model: &Model,
         stream: bool,
     ) -> Result<ChatCompletionsData> {
+        self.guard_media_capabilities(model)?;
         let mut messages = self.build_messages()?;
         patch_messages(&mut messages, model);
         model.guard_max_input_tokens(&messages)?;
@@ -794,4 +820,121 @@ mod input_audio_video_tests {
             _ => panic!("Expected Array content"),
         }
     }
+
+    #[test]
+    fn test_guard_rejects_audio_without_support() {
+        let input = Input {
+            text: "transcribe this".to_string(),
+            media_parts: vec![MessageContentPart::AudioUrl {
+                audio_url: MediaUrl {
+                    url: "data:audio/mpeg;base64,xyz".to_string(),
+                    mime_type: None,
+                },
+            }],
+            config: GlobalConfig::default(),
+            raw: ("transcribe this".to_string(), vec![]),
+            patched_text: None,
+            last_reply: None,
+            continue_output: None,
+            regenerate: None,
+            data_urls: HashMap::new(),
+            tool_calls: None,
+            role: Role::default(),
+            rag_name: None,
+            with_session: false,
+            with_agent: false,
+        };
+        let model = Model::new("test", "gpt-4");
+        let result = input.prepare_completion_data(&model, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not support audio"));
+    }
+
+    #[test]
+    fn test_guard_rejects_video_without_support() {
+        let input = Input {
+            text: "describe this".to_string(),
+            media_parts: vec![MessageContentPart::VideoUrl {
+                video_url: MediaUrl {
+                    url: "data:video/mp4;base64,xyz".to_string(),
+                    mime_type: None,
+                },
+            }],
+            config: GlobalConfig::default(),
+            raw: ("describe this".to_string(), vec![]),
+            patched_text: None,
+            last_reply: None,
+            continue_output: None,
+            regenerate: None,
+            data_urls: HashMap::new(),
+            tool_calls: None,
+            role: Role::default(),
+            rag_name: None,
+            with_session: false,
+            with_agent: false,
+        };
+        let model = Model::new("test", "gpt-4");
+        let result = input.prepare_completion_data(&model, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not support video"));
+    }
+
+    #[test]
+    fn test_guard_allows_audio_with_support() {
+        let input = Input {
+            text: "transcribe this".to_string(),
+            media_parts: vec![MessageContentPart::AudioUrl {
+                audio_url: MediaUrl {
+                    url: "data:audio/mpeg;base64,xyz".to_string(),
+                    mime_type: None,
+                },
+            }],
+            config: GlobalConfig::default(),
+            raw: ("transcribe this".to_string(), vec![]),
+            patched_text: None,
+            last_reply: None,
+            continue_output: None,
+            regenerate: None,
+            data_urls: HashMap::new(),
+            tool_calls: None,
+            role: Role::default(),
+            rag_name: None,
+            with_session: false,
+            with_agent: false,
+        };
+        let mut model = Model::new("test", "gpt-4o");
+        model.data_mut().supports_audio = true;
+        let result = input.prepare_completion_data(&model, false);
+        assert!(result.is_ok(), "should allow audio when model supports it");
+    }
+
+    #[test]
+    fn test_guard_allows_video_with_support() {
+        let input = Input {
+            text: "describe this".to_string(),
+            media_parts: vec![MessageContentPart::VideoUrl {
+                video_url: MediaUrl {
+                    url: "data:video/mp4;base64,xyz".to_string(),
+                    mime_type: None,
+                },
+            }],
+            config: GlobalConfig::default(),
+            raw: ("describe this".to_string(), vec![]),
+            patched_text: None,
+            last_reply: None,
+            continue_output: None,
+            regenerate: None,
+            data_urls: HashMap::new(),
+            tool_calls: None,
+            role: Role::default(),
+            rag_name: None,
+            with_session: false,
+            with_agent: false,
+        };
+        let mut model = Model::new("test", "gpt-4o");
+        model.data_mut().supports_video = true;
+        let result = input.prepare_completion_data(&model, false);
+        assert!(result.is_ok(), "should allow video when model supports it");
+    }
+
 }
