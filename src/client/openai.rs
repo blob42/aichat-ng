@@ -224,7 +224,11 @@ struct EmbeddingsResBodyEmbedding {
     embedding: Vec<f32>,
 }
 
-pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Model, native_audio: bool) -> Value {
+pub fn openai_build_chat_completions_body(
+    data: ChatCompletionsData,
+    model: &Model,
+    native_audio: bool // true -> "input_audio", false - "audio_url"
+) -> Value {
     let ChatCompletionsData {
         messages,
         temperature,
