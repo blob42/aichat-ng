@@ -882,7 +882,7 @@ fn parse_messages(message: Vec<Value>) -> Result<Vec<Message>> {
                     if tool_calls.len() == tool_values.len() {
                         let mut list = vec![];
                         for ((id, name, arguments), (value, tool_call_id)) in
-                            tool_calls.into_iter().zip(tool_values.into_iter())
+                            tool_calls.into_iter().zip(tool_values)
                         {
                             if id != tool_call_id {
                                 return Err(err());

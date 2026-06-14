@@ -280,7 +280,7 @@ pub fn openai_build_chat_completions_body(
                         }
                         messages
                     } else {
-                        tool_results.into_iter().flat_map(|tool_result| {
+                        tool_results.iter().flat_map(|tool_result| {
                             vec![
                                 json!({
                                     "role": MessageRole::Assistant,
@@ -305,7 +305,7 @@ pub fn openai_build_chat_completions_body(
                     }
                 }
                 MessageContent::Text(text) if role.is_assistant() && i != messages_len - 1 => {
-                    vec![json!({ "role": role, "content": strip_think_tag(&text) }
+                    vec![json!({ "role": role, "content": strip_think_tag(text) }
                     )]
                 }
                 _ => vec![json!({ "role": role, "content": content_value })],

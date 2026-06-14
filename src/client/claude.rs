@@ -318,6 +318,61 @@ pub fn claude_build_chat_completions_body(
     Ok(body)
 }
 
+pub fn claude_extract_chat_completions(data: &Value) -> Result<ChatCompletionsOutput> {
+    let mut text = String::new();
+    let mut reasoning = None;
+    let mut tool_calls = vec![];
+    if let Some(list) = data["content"].as_array() {
+        for item in list {
+            match item["type"].as_str() {
+                Some("thinking") => {
+                    if let Some(v) = item["thinking"].as_str() {
+                        reasoning = Some(v.to_string());
+                    }
+                }
+                Some("text") => {
+                    if let Some(v) = item["text"].as_str() {
+                        if !text.is_empty() {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str(v);
+                    }
+                }
+                Some("tool_use") => {
+                    if let (Some(name), Some(input), Some(id)) = (
+                        item["name"].as_str(),
+                        item.get("input"),
+                        item["id"].as_str(),
+                    ) {
+                        tool_calls.push(ToolCall::new(
+                            name.to_string(),
+                            input.clone(),
+                            Some(id.to_string()),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(reasoning) = reasoning {
+        text = format!("<think>\n{reasoning}\n</think>\n\n{text}")
+    }
+
+    if text.is_empty() && tool_calls.is_empty() {
+        bail!("Invalid response data: {data}");
+    }
+
+    let output = ChatCompletionsOutput {
+        text: text.to_string(),
+        tool_calls,
+        id: data["id"].as_str().map(|v| v.to_string()),
+        input_tokens: data["usage"]["input_tokens"].as_u64(),
+        output_tokens: data["usage"]["output_tokens"].as_u64(),
+    };
+    Ok(output)
+}
+
 #[cfg(test)]
 mod claude_audio_video_tests {
     use super::*;
@@ -380,57 +435,3 @@ mod claude_audio_video_tests {
     }
 }
 
-pub fn claude_extract_chat_completions(data: &Value) -> Result<ChatCompletionsOutput> {
-    let mut text = String::new();
-    let mut reasoning = None;
-    let mut tool_calls = vec![];
-    if let Some(list) = data["content"].as_array() {
-        for item in list {
-            match item["type"].as_str() {
-                Some("thinking") => {
-                    if let Some(v) = item["thinking"].as_str() {
-                        reasoning = Some(v.to_string());
-                    }
-                }
-                Some("text") => {
-                    if let Some(v) = item["text"].as_str() {
-                        if !text.is_empty() {
-                            text.push_str("\n\n");
-                        }
-                        text.push_str(v);
-                    }
-                }
-                Some("tool_use") => {
-                    if let (Some(name), Some(input), Some(id)) = (
-                        item["name"].as_str(),
-                        item.get("input"),
-                        item["id"].as_str(),
-                    ) {
-                        tool_calls.push(ToolCall::new(
-                            name.to_string(),
-                            input.clone(),
-                            Some(id.to_string()),
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    if let Some(reasoning) = reasoning {
-        text = format!("<think>\n{reasoning}\n</think>\n\n{text}")
-    }
-
-    if text.is_empty() && tool_calls.is_empty() {
-        bail!("Invalid response data: {data}");
-    }
-
-    let output = ChatCompletionsOutput {
-        text: text.to_string(),
-        tool_calls,
-        id: data["id"].as_str().map(|v| v.to_string()),
-        input_tokens: data["usage"]["input_tokens"].as_u64(),
-        output_tokens: data["usage"]["output_tokens"].as_u64(),
-    };
-    Ok(output)
-}

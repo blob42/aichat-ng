@@ -127,9 +127,15 @@ impl Model {
     }
 
     #[allow(dead_code)]
-    pub fn supports_vision(&self) -> bool { self.data.supports_vision }
-    pub fn supports_audio(&self) -> bool { self.data.supports_audio }
-    pub fn supports_video(&self) -> bool { self.data.supports_video }
+    pub fn supports_vision(&self) -> bool {
+        self.data.supports_vision
+    }
+    pub fn supports_audio(&self) -> bool {
+        self.data.supports_audio
+    }
+    pub fn supports_video(&self) -> bool {
+        self.data.supports_video
+    }
 
     pub fn description(&self) -> String {
         match self.model_type() {
@@ -424,7 +430,6 @@ where
         None => "-".to_string(),
     }
 }
-
 
 #[cfg(test)]
 mod model_audio_video_tests {

@@ -263,13 +263,11 @@ impl Input {
                         )
                     }
                 }
-                MessageContentPart::VideoUrl { .. } => {
-                    if !model.supports_video() {
-                        bail!(
-                            "Model '{}' does not support video input. Use a model with video support.",
-                            model.id()
-                        )
-                    }
+                MessageContentPart::VideoUrl { .. } if !model.supports_video() => {
+                    bail!(
+                        "Model '{}' does not support video input. Use a model with video support.",
+                        model.id()
+                    )
                 }
                 _ => {}
             }
