@@ -5,6 +5,7 @@ AIChat is an all-in-one LLM CLI tool featuring Shell Assistant, CMD & REPL Mode,
 
 This is a fork ([why?](#why-fork)) of [aichat](https://github.com/sigoden/aichat) with the following improvements:
 
+- Audio/Video input for OpenAI compatible APIs
 - Edit last the response from LLMs using `edit last` command. Similar to oobabooga and open-webui. 
 - Auto complete file system paths after commands that accept paths like `.file ..`
 - Ollama: reimplemented dedicated Ollama model type with full support for Ollama API
@@ -77,6 +78,8 @@ Accept diverse input forms such as stdin, local files and directories, and remot
 Supported audio formats: mp3, wav, ogg, flac, m4a, webm, mp4. Video formats: mp4, webm, avi, mov, mkv.
 
 Use `.transcript <file>` to transcribe audio files to text via the transcription API.
+
+NOTE: audio/video is only supported for OpenAI compatible APIs. PRs welcome for other providers.
 
 - The autocomplete menu will appear for local file system paths as you type
 
