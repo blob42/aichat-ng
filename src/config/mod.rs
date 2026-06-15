@@ -2049,8 +2049,10 @@ impl Config {
         output
     }
 
-    pub fn before_chat_completion(&mut self, input: &Input) -> Result<()> {
-        self.last_message = Some(LastMessage::new(input.clone(), String::new()));
+    pub fn before_chat_completion(&mut self, _input: &Input) -> Result<()> {
+        // Intentionally do NOT set last_message here.
+        // last_message is only set in after_chat_completion on success,
+        // so that cancelled/failed requests preserve the previous valid message.
         Ok(())
     }
 
