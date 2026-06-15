@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aichat Messages Viewer</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #ffffff;
+  --bg-sidebar: #f7f7f8;
+  --bg-user: #e3f2fd;
+  --bg-assistant: #f5f5f5;
+  --bg-code: #f4f4f5;
+  --text: #1a1a1a;
+  --text-secondary: #666666;
+  --border: #e0e0e0;
+  --badge-bg: #e8eaf6;
+  --badge-text: #3f51b5;
+  --hover: #eeeeee;
+  --selected: #d4e4ff;
+  --accent: #1976d2;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e1e;
+    --bg-sidebar: #252526;
+    --bg-user: #1a3a5c;
+    --bg-assistant: #2d2d2d;
+    --bg-code: #2d2d2d;
+    --text: #d4d4d4;
+    --text-secondary: #888888;
+    --border: #3c3c3c;
+    --badge-bg: #2a2f4e;
+    --badge-text: #8c9eff;
+    --hover: #2a2d2e;
+    --selected: #1a3050;
+    --accent: #6ea8fe;
+  }
+}
+
+html, body { height: 100%; font-family: var(--font-body); font-size: 14px; line-height: 1.6; color: var(--text); background: var(--bg); }
+
+/* Main layout */
+#app-screen { display: flex; height: 100%; }
+
+/* Sidebar */
+#sidebar {
+  width: 320px; min-width: 260px; max-width: 50vw; background: var(--bg-sidebar);
+  border-right: 1px solid var(--border); display: flex; flex-direction: column;
+  overflow: hidden; flex-shrink: 0;
+}
+#sidebar-header {
+  padding: 0.75rem 1rem; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  flex-shrink: 0;
+}
+#sidebar-header h2 { font-size: 0.875rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#sidebar-header button, #sidebar-header select {
+  background: none; border: 1px solid var(--border); border-radius: 4px;
+  padding: 2px 8px; font-size: 0.75rem; cursor: pointer; color: var(--text-secondary);
+  white-space: nowrap; flex-shrink: 0;
+}
+#sidebar-header select {
+  background: var(--bg); color: var(--text);
+}
+#sidebar-header button:hover, #sidebar-header select:hover { background: var(--hover); }
+
+#search-box {
+  padding: 0.5rem; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+#search-box input {
+  width: 100%; padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px;
+  font-size: 0.8125rem; background: var(--bg); color: var(--text);
+}
+
+#thread-list {
+  flex: 1; overflow-y: auto; list-style: none;
+}
+.thread-item {
+  padding: 0.5rem 1rem; cursor: pointer; border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+}
+.thread-item:hover { background: var(--hover); }
+.thread-item.selected { background: var(--selected); }
+.thread-title {
+  font-size: 0.8125rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: block;
+}
+.thread-meta {
+  font-size: 0.6875rem; color: var(--text-secondary); margin-top: 2px;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+}
+.thread-role {
+  background: var(--badge-bg); color: var(--badge-text); padding: 0 5px;
+  border-radius: 3px; font-size: 0.6875rem;
+}
+
+/* Main content */
+#main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+
+#message-view { flex: 1; overflow-y: auto; padding: 1.5rem; }
+
+.thread-header-info {
+  margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border);
+}
+.thread-header-info h3 { font-size: 1rem; margin-bottom: 0.25rem; word-break: break-word; }
+.thread-header-info .meta { font-size: 0.75rem; color: var(--text-secondary); display: flex; gap: 0.75rem; flex-wrap: wrap; }
+
+.message-block { margin-bottom: 1rem; }
+.message-label {
+  font-size: 0.6875rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.03em; color: var(--text-secondary); margin-bottom: 0.25rem;
+}
+.message-content {
+  padding: 0.75rem 1rem; border-radius: 6px; font-size: 0.875rem;
+  word-break: break-word; overflow-wrap: break-word;
+}
+.message-content.user { background: var(--bg-user); }
+.message-content.assistant { background: var(--bg-assistant); }
+
+.tool-calls-block {
+  margin: 0.5rem 0; padding: 0.5rem 0.75rem; background: var(--bg-code);
+  border-radius: 4px; font-size: 0.75rem; border-left: 3px solid var(--accent);
+}
+.tool-calls-block summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+.tool-call-item { margin-top: 0.25rem; padding: 0.25rem 0; }
+.tool-call-name { font-weight: 600; }
+
+/* Empty state */
+#empty-state {
+  display: flex; align-items: center; justify-content: center; flex: 1;
+  color: var(--text-secondary); font-size: 0.875rem;
+}
+
+/* Markdown rendering inside message content */
+.message-content h1, .message-content h2, .message-content h3,
+.message-content h4, .message-content h5, .message-content h6 {
+  margin: 0.75em 0 0.25em; font-size: 1em; line-height: 1.3;
+}
+.message-content h1 { font-size: 1.25em; }
+.message-content h2 { font-size: 1.15em; }
+.message-content h3 { font-size: 1.05em; }
+.message-content p { margin: 0.5em 0; }
+.message-content ul, .message-content ol { margin: 0.5em 0; padding-left: 1.5em; }
+.message-content li { margin: 0.15em 0; }
+.message-content blockquote {
+  margin: 0.5em 0; padding: 0.25em 0.75em; border-left: 3px solid var(--border);
+  color: var(--text-secondary);
+}
+.message-content hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+.message-content a { color: var(--accent); }
+.message-content img { max-width: 100%; height: auto; border-radius: 4px; }
+.message-content code {
+  font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-code);
+  padding: 0.1em 0.3em; border-radius: 3px;
+}
+.message-content pre {
+  margin: 0.75em 0; padding: 0.75rem; background: var(--bg-code);
+  border-radius: 4px; overflow-x: auto;
+}
+.message-content pre code { background: none; padding: 0; }
+.message-content table { border-collapse: collapse; margin: 0.5em 0; width: 100%; }
+.message-content th, .message-content td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.message-content th { background: var(--bg-code); font-weight: 600; }
+
+/* Resize handle */
+#resize-handle {
+  width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0;
+  transition: background 0.15s;
+}
+#resize-handle:hover, #resize-handle.active { background: var(--accent); }
+
+/* Mobile */
+@media (max-width: 640px) {
+  #sidebar { width: 100%; max-width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+  #app-screen { flex-direction: column; }
+  #sidebar { height: 40vh; min-width: unset; }
+  #resize-handle { display: none; }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+</style>
+</head>
+<body>
+
+<!-- Main App -->
+<div id="app-screen">
+  <aside id="sidebar">
+    <div id="sidebar-header">
+      <h2 id="file-name">messages.md</h2>
+      <div style="display:flex;gap:4px;align-items:center;">
+        <select id="session-select" title="Select a session">
+          <option value="">Loading...</option>
+        </select>
+        <button id="btn-refresh" title="Reload current view">&#8635;</button>
+        <button id="btn-upload" title="Upload an external file">Upload</button>
+      </div>
+    </div>
+    <div id="search-box">
+      <input type="search" id="search-input" placeholder="Filter threads..." autocomplete="off">
+    </div>
+    <ul id="thread-list"></ul>
+    <input type="file" id="file-input" accept=".md,.txt,.yaml,.yml" style="display:none;">
+  </aside>
+
+  <div id="resize-handle"></div>
+
+  <main id="main">
+    <div id="message-view">
+      <div id="empty-state">Select a thread to view</div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── State ──────────────────────────────────────────────────
+  var threads = [];
+  var selectedIndex = -1;
+  var filterText = '';
+  var currentSource = 'messages'; // 'messages', 'session:<name>', or 'upload'
+
+  // ── DOM refs ───────────────────────────────────────────────
+  var $fileName = document.getElementById('file-name');
+  var $sessionSelect = document.getElementById('session-select');
+  var $btnRefresh = document.getElementById('btn-refresh');
+  var $btnUpload = document.getElementById('btn-upload');
+  var $fileInput = document.getElementById('file-input');
+  var $searchInput = document.getElementById('search-input');
+  var $threadList = document.getElementById('thread-list');
+  var $messageView = document.getElementById('message-view');
+  var $emptyState = document.getElementById('empty-state');
+  var $resizeHandle = document.getElementById('resize-handle');
+
+  // ── Auto-load flow  ──────────────────────
+  function loadDefaultMessages() {
+    currentSource = 'messages';
+    return fetch('/api/messages/default')
+      .then(function(resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+      })
+      .then(function(data) {
+        threads = normalizeThreads(data.threads || []);
+        $fileName.textContent = 'messages.md (' + threads.length + ' threads)';
+        renderThreadList();
+      })
+      .catch(function(err) {
+        console.error('Failed to load messages:', err);
+        threads = [];
+        $fileName.textContent = 'messages.md (error)';
+        renderThreadList();
+      });
+  }
+
+  function loadSessionsList() {
+    return fetch('/api/sessions/list')
+      .then(function(resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+      })
+      .then(function(data) {
+        var sessions = data.sessions || [];
+        $sessionSelect.innerHTML = '';
+
+        var defaultOpt = document.createElement('option');
+        defaultOpt.value = '';
+        defaultOpt.textContent = 'Sessions ▾';
+        $sessionSelect.appendChild(defaultOpt);
+
+        if (sessions.length === 0) {
+          var noneOpt = document.createElement('option');
+          noneOpt.value = '__none__';
+          noneOpt.textContent = '(none)';
+          noneOpt.disabled = true;
+          $sessionSelect.appendChild(noneOpt);
+        } else {
+          sessions.sort().forEach(function(name) {
+            var opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            $sessionSelect.appendChild(opt);
+          });
+        }
+      })
+      .catch(function(err) {
+        console.error('Failed to load sessions:', err);
+        $sessionSelect.innerHTML = '<option value="">Sessions ▾</option>';
+      });
+  }
+
+  function loadSession(name) {
+    currentSource = 'session:' + name;
+    $fileName.textContent = name + ' ...';
+    selectedIndex = -1;
+    filterText = '';
+    $searchInput.value = '';
+    $messageView.innerHTML = '<div id="empty-state">Loading...</div>';
+
+    return fetch('/api/sessions/load?name=' + encodeURIComponent(name))
+      .then(function(resp) {
+        if (!resp.ok) return resp.json().then(function(err) { throw new Error(err.error?.message || 'HTTP ' + resp.status); });
+        return resp.json();
+      })
+      .then(function(data) {
+        threads = normalizeThreads(data.threads || []);
+        $fileName.textContent = name + ' (' + threads.length + ' threads)';
+        renderThreadList();
+        $messageView.innerHTML = '<div id="empty-state">Select a thread to view</div>';
+      })
+      .catch(function(err) {
+        console.error('Failed to load session:', err);
+        alert('Load error: ' + err.message);
+        // Reset dropdown
+        $sessionSelect.value = '';
+        loadDefaultMessages();
+      });
+  }
+
+  // ── Upload fallback  ────────────────────────────
+  function detectFileType(filename) {
+    if (!filename) return 'messages';
+    var lower = filename.toLowerCase();
+    if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return 'session';
+    return 'messages';
+  }
+
+  function uploadFile(file) {
+    currentSource = 'upload';
+    var contentReader = new FileReader();
+    contentReader.onload = function(e) {
+      var content = e.target.result;
+      var fileType = detectFileType(file.name);
+      var endpoint = fileType === 'session' ? '/api/session/parse' : '/api/messages/parse';
+
+      fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: content })
+      })
+      .then(function(resp) {
+        if (!resp.ok) return resp.json().then(function(err) { throw new Error(err.error?.message || 'HTTP ' + resp.status); });
+        return resp.json();
+      })
+      .then(function(data) {
+        threads = normalizeThreads(data.threads || []);
+        showApp(file.name);
+      })
+      .catch(function(err) {
+        alert('Parse error: ' + err.message);
+      });
+    };
+    contentReader.readAsText(file);
+  }
+
+  // ── Thread normalization  ───────────────────────
+  function normalizeThreads(raw) {
+    return raw.map(function(t) {
+      return {
+        id: t.id,
+        title: t.title,
+        timestamp: t.timestamp,
+        role: t.role,
+        rag: t.rag,
+        userMessage: t.user_message,
+        assistantMessage: t.assistant_message,
+        toolCalls: t.tool_calls || [],
+        isSession: t.is_session,
+        sessionMeta: t.meta
+      };
+    });
+  }
+
+  // ── Markdown Renderer (minimal, no deps) ───────────────────
+  function renderMd(text) {
+    if (!text) return '';
+    var html = escapeHtml(text);
+
+    // Code blocks (```lang ... ```)
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
+      var langAttr = lang ? ' data-lang="' + lang + '"' : '';
+      return '<pre><code' + langAttr + '>' + code.trim() + '</code></pre>';
+    });
+
+    // Inline code
+    html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+    // Headings
+    html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+    html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+    // Bold and italic
+    html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+    // Images
+    html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1">');
+
+    // Links
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+    // Horizontal rules
+    html = html.replace(/^---+$/gm, '<hr>');
+
+    // Blockquotes
+    html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+
+    // Unordered lists (- item or * item)
+    html = html.replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
+    html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
+
+    // Ordered lists (1. item)
+    html = html.replace(/^\d+\. (.+)$/gm, '<oli>$1</oli>');
+    html = html.replace(/((?:<oli>.*<\/oli>\n?)+)/g, function(match) {
+      return '<ol>' + match.replace(/<\/?oli>/g, function(t) {
+        return t.replace('oli', 'li');
+      }) + '</ol>';
+    });
+
+    // Tables (basic)
+    html = html.replace(/^\|(.+)\|$/gm, function(tableRow) {
+      var cells = tableRow.split('|').filter(function(c) { return c.trim() !== ''; });
+      if (cells.every(function(c) { return /^[\s\-:]+$/.test(c); })) return ''; // separator row
+      var tag = 'td';
+      var row = cells.map(function(c) { return '<' + tag + '>' + c.trim() + '</' + tag + '>'; }).join('');
+      return '<tr>' + row + '</tr>';
+    });
+    html = html.replace(/((?:<tr>.*<\/tr>\n?)+)/g, '<table>$1</table>');
+
+    // Paragraphs: wrap remaining lines
+    html = html.replace(/\n\n/g, '</p><p>');
+    html = html.replace(/\n/g, '<br>');
+    html = '<p>' + html + '</p>';
+
+    // Clean up empty paragraphs
+    html = html.replace(/<p>\s*<\/p>/g, '');
+    html = html.replace(/<p>\s*(<h[1-6]>)/g, '$1');
+    html = html.replace(/(<\/h[1-6]>)\s*<\/p>/g, '$1');
+    html = html.replace(/<p>\s*(<pre>)/g, '$1');
+    html = html.replace(/(<\/pre>)\s*<\/p>/g, '$1');
+    html = html.replace(/<p>\s*(<ul>)/g, '$1');
+    html = html.replace(/(<\/ul>)\s*<\/p>/g, '$1');
+    html = html.replace(/<p>\s*(<ol>)/g, '$1');
+    html = html.replace(/(<\/ol>)\s*<\/p>/g, '$1');
+    html = html.replace(/<p>\s*(<table>)/g, '$1');
+    html = html.replace(/(<\/table>)\s*<\/p>/g, '$1');
+    html = html.replace(/<p>\s*(<hr>)/g, '$1');
+    html = html.replace(/<p>\s*(<blockquote>)/g, '$1');
+
+    return html;
+  }
+
+  function escapeHtml(text) {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // ── Formatting ─────────────────────────────────────────────
+  function formatDate(isoStr) {
+    try {
+      var d = new Date(isoStr);
+      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    } catch(e) { return isoStr; }
+  }
+
+  function formatTimeAgo(isoStr) {
+    try {
+      var diff = Date.now() - new Date(isoStr).getTime();
+      var mins = Math.floor(diff / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      var hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      var days = Math.floor(hrs / 24);
+      if (days < 30) return days + 'd ago';
+      return Math.floor(days / 30) + 'mo ago';
+    } catch(e) { return ''; }
+  }
+
+  // ── Rendering ──────────────────────────────────────────────
+  function getFilteredThreads() {
+    if (!filterText) return threads;
+    var q = filterText.toLowerCase();
+    return threads.filter(function(t) {
+      return t.title.toLowerCase().includes(q) ||
+        (t.role && t.role.toLowerCase().includes(q)) ||
+        t.userMessage.toLowerCase().includes(q);
+    });
+  }
+
+  function renderThreadList() {
+    var filtered = getFilteredThreads();
+    $threadList.innerHTML = '';
+
+    if (filtered.length === 0) {
+      $threadList.innerHTML = '<li style="padding:1rem;color:var(--text-secondary);font-size:0.8125rem;text-align:center;">' +
+        (threads.length === 0 ? 'No messages yet' : 'No matches') + '</li>';
+      return;
+    }
+
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < filtered.length; i++) {
+      var t = filtered[i];
+      var li = document.createElement('li');
+      li.className = 'thread-item' + (t.id === selectedIndex ? ' selected' : '');
+      li.dataset.id = t.id;
+
+      var metaHtml = '';
+      if (t.timestamp) {
+        metaHtml = formatDate(t.timestamp) + ' · ' + formatTimeAgo(t.timestamp);
+      }
+      if (t.role) metaHtml += ' <span class="thread-role">' + escapeHtml(t.role) + '</span>';
+
+      li.innerHTML = '<span class="thread-title">' + escapeHtml(t.title) + '</span>' +
+        '<div class="thread-meta">' + metaHtml + '</div>';
+
+      li.addEventListener('click', (function(id) {
+        return function() { selectThread(id); };
+      })(t.id));
+      frag.appendChild(li);
+    }
+    $threadList.appendChild(frag);
+  }
+
+  function selectThread(id) {
+    selectedIndex = id;
+    var t = threads[id];
+    if (!t) return;
+
+    renderThreadList(); // update selection highlight
+
+    var html = '<div class="thread-header-info">';
+    html += '<h3>' + escapeHtml(t.title) + '</h3>';
+    html += '<div class="meta">';
+    if (t.timestamp) {
+      html += '<span>' + formatDate(t.timestamp) + ' ' + formatTimeAgo(t.timestamp) + '</span>';
+    }
+    if (t.role) html += '<span>Role: <strong>' + escapeHtml(t.role) + '</strong></span>';
+    if (t.rag) html += '<span>RAG: ' + escapeHtml(t.rag) + '</span>';
+    html += '</div></div>';
+
+    // User message
+    html += '<div class="message-block">';
+    html += '<div class="message-label">User</div>';
+    html += '<div class="message-content user">' + renderMd(t.userMessage) + '</div>';
+    html += '</div>';
+
+    // Tool calls (if any)
+    if (t.toolCalls && t.toolCalls.length > 0) {
+      html += '<details class="tool-calls-block">';
+      html += '<summary>Tool Calls (' + t.toolCalls.length + ')</summary>';
+      for (var j = 0; j < t.toolCalls.length; j++) {
+        var tc = t.toolCalls[j];
+        html += '<div class="tool-call-item">';
+        html += '<span class="tool-call-name">' + escapeHtml(tc.name || 'unknown') + '</span>';
+        if (tc.arguments) {
+          html += '<pre style="margin:0.25em 0;font-size:0.75rem;overflow-x:auto;">' +
+            escapeHtml(typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments, null, 2)) +
+            '</pre>';
+        }
+        if (tc.result) {
+          html += '<pre style="margin:0.25em 0;font-size:0.75rem;overflow-x:auto;">' +
+            escapeHtml(typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2)) +
+            '</pre>';
+        }
+        html += '</div>';
+      }
+      html += '</details>';
+    }
+
+    // Assistant message
+    html += '<div class="message-block">';
+    html += '<div class="message-label">Assistant' + (t.role ? ' · ' + escapeHtml(t.role) : '') + '</div>';
+    html += '<div class="message-content assistant">' + renderMd(t.assistantMessage) + '</div>';
+    html += '</div>';
+
+    $messageView.innerHTML = html;
+  }
+
+  // ── App display ────────────────────────────────────────────
+  function showApp(name) {
+    $fileName.textContent = name + ' (' + threads.length + ' threads)';
+    selectedIndex = -1;
+    filterText = '';
+    $searchInput.value = '';
+    renderThreadList();
+    $messageView.innerHTML = '<div id="empty-state">Select a thread to view</div>';
+  }
+
+  // ── Refresh handler ────────────────────────────────────────
+  function refreshCurrent() {
+    selectedIndex = -1;
+    filterText = '';
+    $searchInput.value = '';
+    if (currentSource === 'messages') {
+      loadDefaultMessages();
+    } else if (currentSource.indexOf('session:') === 0) {
+      var sessionName = currentSource.substring(8);
+      loadSession(sessionName);
+    } else {
+      // upload — re-trigger file picker
+      $fileInput.click();
+    }
+  }
+
+  // ── Resize Handle ──────────────────────────────────────────
+  var isResizing = false;
+  $resizeHandle.addEventListener('mousedown', function(e) {
+    isResizing = true;
+    $resizeHandle.classList.add('active');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!isResizing) return;
+    var sidebar = document.getElementById('sidebar');
+    var newWidth = Math.max(200, Math.min(window.innerWidth * 0.7, e.clientX));
+    sidebar.style.width = newWidth + 'px';
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!isResizing) return;
+    isResizing = false;
+    $resizeHandle.classList.remove('active');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+
+  // ── Event Listeners ────────────────────────────────────────
+  $btnRefresh.addEventListener('click', refreshCurrent);
+
+  $btnUpload.addEventListener('click', function() {
+    $fileInput.click();
+  });
+
+  $fileInput.addEventListener('change', function() {
+    var file = this.files[0];
+    if (file) uploadFile(file);
+    this.value = ''; // reset so same file can be re-uploaded
+  });
+
+  $sessionSelect.addEventListener('change', function() {
+    var name = this.value;
+    if (!name || name === '__none__') {
+      // Reset to default messages view
+      this.value = '';
+      loadDefaultMessages();
+      return;
+    }
+    loadSession(name);
+  });
+
+  $searchInput.addEventListener('input', function() {
+    filterText = this.value;
+    renderThreadList();
+  });
+
+  // Keyboard navigation
+  document.addEventListener('keydown', function(e) {
+    if (e.target === $searchInput) return; // don't intercept while typing in search
+    if (threads.length === 0) return;
+
+    var filtered = getFilteredThreads();
+    if (filtered.length === 0) return;
+
+    var currentIdx = -1;
+    if (selectedIndex >= 0) {
+      currentIdx = filtered.findIndex(function(t) { return t.id === selectedIndex; });
+      if (currentIdx < 0) currentIdx = 0;
+    }
+
+    if (e.key === 'ArrowDown' || e.key === 'j') {
+      e.preventDefault();
+      currentIdx = Math.min(currentIdx + 1, filtered.length - 1);
+      selectThread(filtered[currentIdx].id);
+      scrollToSelected();
+    } else if (e.key === 'ArrowUp' || e.key === 'k') {
+      e.preventDefault();
+      currentIdx = Math.max(currentIdx <= 0 ? 0 : currentIdx - 1, 0);
+      selectThread(filtered[currentIdx].id);
+      scrollToSelected();
+    } else if (e.key === '/' || (e.key === 'f' && (e.ctrlKey || e.metaKey))) {
+      e.preventDefault();
+      $searchInput.focus();
+    }
+  });
+
+  function scrollToSelected() {
+    var el = $threadList.querySelector('.selected');
+    if (el) el.scrollIntoView({ block: 'nearest' });
+  }
+
+  // ── Initialize on page load ────────────────────────────────
+  loadDefaultMessages();
+  loadSessionsList();
+
+})();
+</script>
+</body>
+</html>

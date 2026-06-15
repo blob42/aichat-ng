@@ -6,6 +6,7 @@ AIChat is an all-in-one LLM CLI tool featuring Shell Assistant, CMD & REPL Mode,
 This is a fork ([why?](#why-fork)) of [aichat](https://github.com/sigoden/aichat) with the following improvements:
 
 - Audio/Video input for OpenAI compatible APIs
+- Browse and search chat history and sessions with the [message viewer](#messages-viewer)
 - Edit last the response from LLMs using `edit last` command. Similar to oobabooga and open-webui. 
 - Auto complete file system paths after commands that accept paths like `.file ..`
 - Ollama: reimplemented dedicated Ollama model type with full support for Ollama API
@@ -140,6 +141,7 @@ Embeddings API:       http://127.0.0.1:8000/v1/embeddings
 Rerank API:           http://127.0.0.1:8000/v1/rerank
 LLM Playground:       http://127.0.0.1:8000/playground
 LLM Arena:            http://127.0.0.1:8000/arena?num=2
+Messages Viewer:      http://127.0.0.1:8000/messages
 ```
 
 #### Proxy LLM APIs
@@ -167,6 +169,26 @@ A web application to interact with supported LLMs directly from your browser.
 A web platform to compare different LLMs side-by-side.
 
 ![aichat-llm-arena](https://github.com/user-attachments/assets/edabba53-a1ef-4817-9153-38542ffbfec6)
+
+### Messages Viewer
+
+Browse and search your chat history directly in the browser. The Messages Viewer auto-loads your `messages.md` log and all saved sessions — no file upload required.
+
+Access it at `http://127.0.0.1:8000/messages` when the server is running (`aichat --serve`).
+
+**Features:**
+
+- **Auto-loaded history** — your default `messages.md` and all sessions appear on page open
+- **Session browser** — switch between sessions with a dropdown selector
+- **Thread sidebar** — clickable list of conversations with titles, timestamps, roles, and RAG labels
+- **Search & filter** — filter threads by keyword in real time
+- **Keyboard navigation** — arrow keys to browse threads, `/` to focus search
+- **Tool call viewer** — inspect tool calls and their results inline
+- **Dark mode** — matches the terminal aesthetic
+- **Resizable sidebar** — drag the divider to adjust layout
+- **File upload fallback** — view external `messages.md` or session YAML files not in your config directory
+
+![aichat-messages](https://github.com/user-attachments/assets/ac5cd489-36f7-4c55-9efe-4605baec1c07)
 
 ## Custom Themes
 

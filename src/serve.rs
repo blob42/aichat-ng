@@ -12,14 +12,14 @@ use hyper::{
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     convert::Infallible,
     net::IpAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, LazyLock,
     },
 };
 use tokio::{
@@ -35,6 +35,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 const DEFAULT_MODEL_NAME: &str = "default";
 const PLAYGROUND_HTML: &[u8] = include_bytes!("../assets/playground.html");
 const ARENA_HTML: &[u8] = include_bytes!("../assets/arena.html");
+const MESSAGES_HTML: &[u8] = include_bytes!("../assets/messages.html");
 
 type AppResponse = Response<BoxBody<Bytes, Infallible>>;
 
@@ -59,6 +60,7 @@ pub async fn run(config: GlobalConfig, addr: Option<String>) -> Result<()> {
     println!("Rerank API:           http://{addr}/v1/rerank");
     println!("LLM Playground:       http://{addr}/playground");
     println!("LLM Arena:            http://{addr}/arena?num=2");
+    println!("Messages Viewer:      http://{addr}/messages");
     shutdown_signal().await;
     let _ = stop_server.send(());
     Ok(())
@@ -173,6 +175,18 @@ impl Server {
             self.playground_page()
         } else if path == "/arena" || path == "/arena.html" {
             self.arena_page()
+        } else if path == "/messages" || path == "/messages.html" {
+            self.messages_page()
+        } else if path == "/api/messages/default" {
+            self.load_default_messages()
+        } else if path == "/api/sessions/list" {
+            self.list_sessions()
+        } else if path == "/api/sessions/load" {
+            self.load_session(req).await
+        } else if path == "/api/messages/parse" {
+            self.parse_messages_file(req).await
+        } else if path == "/api/session/parse" {
+            self.parse_session_file(req).await
         } else {
             status = StatusCode::NOT_FOUND;
             Err(anyhow!("Not Found"))
@@ -207,6 +221,78 @@ impl Server {
             .header("Content-Type", "text/html; charset=utf-8")
             .body(Full::new(Bytes::from(ARENA_HTML)).boxed())?;
         Ok(res)
+    }
+
+    // --- Messages UI Handlers  ---
+
+    /// Serve the Messages UI HTML page
+    fn messages_page(&self) -> Result<AppResponse> {
+        let res = Response::builder()
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body(Full::new(Bytes::from(MESSAGES_HTML)).boxed())?;
+        Ok(res)
+    }
+
+    /// Auto-load messages.md from config, parse and return JSON
+    fn load_default_messages(&self) -> Result<AppResponse> {
+        let path = self.config.messages_file();
+        if !path.exists() {
+            return Ok(ret_json(&json!({ "threads": Vec::<UiThread>::new() })));
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|err| anyhow!("Failed to read messages file: {err}"))?;
+        let threads = parse_messages_md(&content)?;
+        Ok(ret_json(&json!({ "threads": threads })))
+    }
+
+    /// List all available session names, merge + deduplicate + sort
+    fn list_sessions(&self) -> Result<AppResponse> {
+        let sessions = self.config.list_sessions();
+        let autoname = self.config.list_autoname_sessions();
+        let mut all: Vec<String> = sessions.into_iter().chain(autoname).collect();
+        all.sort_unstable();
+        all.dedup();
+        Ok(ret_json(&json!({ "sessions": all })))
+    }
+
+    /// Load a named session by ?name=... query param
+    async fn load_session(&self, req: hyper::Request<Incoming>) -> Result<AppResponse> {
+        let name = extract_query_param(req.uri(), "name")
+            .ok_or_else(|| anyhow!("Missing 'name' query parameter"))?;
+
+        let path = self.config.session_file(&name);
+        if !path.exists() {
+            bail!("Session '{}' not found at {}", name, path.display());
+        }
+
+        let content = std::fs::read_to_string(&path)
+            .map_err(|err| anyhow!("Failed to read session file: {err}"))?;
+
+        let session: Session =
+            serde_yaml::from_str(&content).map_err(|err| anyhow!("Invalid session YAML: {err}"))?;
+
+        let threads = session_to_ui_threads(&session);
+        Ok(ret_json(&json!({ "threads": threads })))
+    }
+
+    /// POST endpoint to parse an uploaded messages.md file content
+    async fn parse_messages_file(&self, req: hyper::Request<Incoming>) -> Result<AppResponse> {
+        let req_body = req.collect().await?.to_bytes();
+        let body: ParseRequestBody = serde_json::from_slice(&req_body)
+            .map_err(|err| anyhow!("Invalid request body: {err}"))?;
+        let threads = parse_messages_md(&body.content)?;
+        Ok(ret_json(&json!({ "threads": threads })))
+    }
+
+    /// POST endpoint to parse an uploaded session YAML file content
+    async fn parse_session_file(&self, req: hyper::Request<Incoming>) -> Result<AppResponse> {
+        let req_body = req.collect().await?.to_bytes();
+        let body: ParseRequestBody = serde_json::from_slice(&req_body)
+            .map_err(|err| anyhow!("Invalid request body: {err}"))?;
+        let session: Session = serde_yaml::from_str(&body.content)
+            .map_err(|err| anyhow!("Invalid session YAML: {err}"))?;
+        let threads = session_to_ui_threads(&session);
+        Ok(ret_json(&json!({ "threads": threads })))
     }
 
     fn list_models(&self) -> Result<AppResponse> {
@@ -574,6 +660,336 @@ impl Server {
             .body(Full::new(Bytes::from(output.to_string())).boxed())?;
         Ok(res)
     }
+}
+
+// Messages UI response structs
+
+#[derive(Debug, Serialize)]
+struct UiThread {
+    id: usize,
+    title: String,
+    timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rag: Option<String>,
+    user_message: String,
+    tool_calls: Vec<UiToolCall>,
+    assistant_message: String,
+    is_session: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<UiSessionMeta>,
+}
+
+#[derive(Debug, Serialize)]
+struct UiToolCall {
+    name: String,
+    arguments: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct UiSessionMeta {
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    use_tools: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_instructions: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParseRequestBody {
+    content: String,
+}
+
+/// Helper for consistent JSON response building
+fn ret_json(data: &Value) -> AppResponse {
+    Response::builder()
+        .header("Content-Type", "application/json; charset=utf-8")
+        .body(Full::new(Bytes::from(data.to_string())).boxed())
+        .unwrap()
+}
+
+// --- Parsing Logic  ---
+
+/// Convert a Session (YAML) to Vec<UiThread> with proper user/assistant pairing, tool call extraction, and session metadata
+fn session_to_ui_threads(session: &Session) -> Vec<UiThread> {
+    let all_messages: Vec<&Message> = session
+        .compressed_messages()
+        .iter()
+        .chain(session.messages().iter())
+        .collect();
+
+    let mut threads = Vec::new();
+    let mut i = 0;
+
+    while i < all_messages.len() {
+        let msg = &all_messages[i];
+
+        // Skip system and tool messages at top level
+        if msg.role.is_system() || msg.role == MessageRole::Tool {
+            i += 1;
+            continue;
+        }
+
+        if msg.role.is_user() {
+            let user_text = msg.content.to_text().trim().to_string();
+            let mut tool_calls = Vec::new();
+            let mut assistant_parts = Vec::new();
+
+            i += 1;
+            // Collect assistant response(s) and tool calls following this user message
+            while i < all_messages.len() {
+                let next = &all_messages[i];
+                if next.role.is_assistant() {
+                    let text = next.content.to_text().trim().to_string();
+                    if !text.is_empty() {
+                        assistant_parts.push(text);
+                    }
+                    // Check for tool calls embedded in assistant message
+                    if let MessageContent::ToolCalls(tc) = &next.content {
+                        for tr in &tc.tool_results {
+                            tool_calls.push(UiToolCall {
+                                name: tr.call.name.clone(),
+                                arguments: serde_json::to_value(&tr.call.arguments)
+                                    .unwrap_or_default(),
+                                id: tr.call.id.clone(),
+                                result: Some(serde_json::to_value(&tr.output).unwrap_or_default()),
+                            });
+                        }
+                    }
+                    i += 1;
+                } else if next.role == MessageRole::Tool {
+                    // Standalone tool role messages — extract tool call info
+                    if let MessageContent::ToolCalls(tc) = &next.content {
+                        for tr in &tc.tool_results {
+                            tool_calls.push(UiToolCall {
+                                name: tr.call.name.clone(),
+                                arguments: serde_json::to_value(&tr.call.arguments)
+                                    .unwrap_or_default(),
+                                id: tr.call.id.clone(),
+                                result: Some(serde_json::to_value(&tr.output).unwrap_or_default()),
+                            });
+                        }
+                    }
+                    i += 1;
+                } else {
+                    break; // Next user message or system — end of this thread
+                }
+            }
+
+            threads.push(UiThread {
+                id: threads.len(),
+                title: user_text.chars().take(80).collect(),
+                timestamp: String::new(),
+                role: session.role_name().map(|s| s.to_string()),
+                rag: None,
+                user_message: user_text,
+                tool_calls,
+                assistant_message: assistant_parts.join("\n\n"),
+                is_session: true,
+                meta: Some(UiSessionMeta {
+                    model: session.model_id().to_string(),
+                    temperature: session.temperature(),
+                    top_p: session.top_p(),
+                    use_tools: session.use_tools(),
+                    role_name: session.role_name().map(|s| s.to_string()),
+                    agent_instructions: if session.agent_instructions().is_empty() {
+                        None
+                    } else {
+                        Some(session.agent_instructions().to_string())
+                    },
+                }),
+            });
+        } else {
+            i += 1;
+        }
+    }
+
+    threads
+}
+
+/// Parse messages.md format using regex header matching, extracts title/timestamp/scope, user message, tool calls block, and assistant message
+/// Supports both new format `# CHAT: title [timestamp] (scope)` and old format `# CHAT:[timestamp] (scope)`.
+fn parse_messages_md(content: &str) -> Result<Vec<UiThread>> {
+    // New format: # CHAT: title [timestamp] (scope)
+    static HEADER_RE_NEW: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+        fancy_regex::Regex::new(r"^# CHAT: (.+?) \[(.+?)\](?: \((.+?)\))?\s*$").unwrap()
+    });
+    // Old format (circa 2023): # CHAT:[timestamp] (scope)
+    static HEADER_RE_OLD: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+        fancy_regex::Regex::new(r"^# CHAT: ?\[(.+?)\](?: \((.+?)\))?\s*$").unwrap()
+    });
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut threads = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+        // Try new format first (has title), then old format (no title)
+        let new_match = HEADER_RE_NEW.captures(line).ok().and_then(|c| c);
+        let is_new = new_match.is_some();
+        let m = new_match.or_else(|| HEADER_RE_OLD.captures(line).ok().and_then(|c| c));
+        let Some(m) = m else {
+            i += 1;
+            continue;
+        };
+
+        let title = if is_new {
+            m.get(1).map(|m| m.as_str().to_string()).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let timestamp = if is_new {
+            // New format: groups are (1=title, 2=timestamp, 3=scope)
+            m.get(2).map(|m| m.as_str()).unwrap_or("").to_string()
+        } else {
+            // Old format: groups are (1=timestamp, 2=scope)
+            m.get(1).map(|m| m.as_str()).unwrap_or("").to_string()
+        };
+        let scope = if is_new {
+            m.get(3).map(|m| m.as_str()).unwrap_or("")
+        } else {
+            m.get(2).map(|m| m.as_str()).unwrap_or("")
+        };
+        let (role, rag) = parse_scope(scope);
+
+        i += 1;
+
+        // Collect user message until first --------
+        let mut user_lines = Vec::new();
+        while i < lines.len() && lines[i] != "--------" {
+            user_lines.push(lines[i]);
+            i += 1;
+        }
+        if i < lines.len() {
+            i += 1;
+        } // skip first --------
+
+        // Check for tool calls block, then collect assistant message
+        let mut tool_calls = Vec::new();
+        let mut assistant_lines = Vec::new();
+
+        // Peek for <tool_calls> block
+        let mut scan = i;
+        let mut tc_start = None;
+        let mut tc_end = None;
+        while scan < lines.len() && lines[scan] != "--------" {
+            if lines[scan].trim() == "<tool_calls>" {
+                tc_start = Some(scan);
+            }
+            if lines[scan].trim() == "</tool_calls>" {
+                tc_end = Some(scan);
+                break;
+            }
+            scan += 1;
+        }
+
+        if let (Some(start), Some(end)) = (tc_start, tc_end) {
+            if end > start {
+                // Parse tool calls from JSON between tags
+                let tc_content = lines[start + 1..end].join("\n").trim().to_string();
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&tc_content) {
+                    if let Some(arr) = json.as_array() {
+                        for item in arr {
+                            if let (Some(name), Some(args)) = (
+                                item.get("name").and_then(|v| v.as_str()),
+                                item.get("arguments"),
+                            ) {
+                                tool_calls.push(UiToolCall {
+                                    name: name.to_string(),
+                                    arguments: args.clone(),
+                                    id: None,
+                                    result: None,
+                                });
+                            }
+                        }
+                    }
+                }
+                // Assistant message is after </tool_calls>
+                let mut ai = end + 1;
+                while ai < lines.len() && lines[ai] != "--------" {
+                    assistant_lines.push(lines[ai]);
+                    ai += 1;
+                }
+                i = ai;
+            }
+        } else {
+            // No tool calls — everything until next -------- is assistant message
+            while i < lines.len() && lines[i] != "--------" {
+                assistant_lines.push(lines[i]);
+                i += 1;
+            }
+        }
+
+        if i < lines.len() {
+            i += 1;
+        } // skip closing --------
+
+        let user_message = user_lines.join("\n").trim().to_string();
+
+        // Filter out messages that consist of only the single token "hi"
+        if user_message == "hi" {
+            continue;
+        }
+
+        threads.push(UiThread {
+            id: threads.len(),
+            title,
+            timestamp,
+            role,
+            rag,
+            user_message,
+            tool_calls,
+            assistant_message: assistant_lines.join("\n").trim().to_string(),
+            is_session: false,
+            meta: None,
+        });
+
+        // Skip blank lines between threads
+        while i < lines.len() && lines[i].trim().is_empty() {
+            i += 1;
+        }
+    }
+
+    Ok(threads)
+}
+
+/// Split scope string by '#' into (role, rag) tuple, handle '%%' as null role
+fn parse_scope(scope: &str) -> (Option<String>, Option<String>) {
+    if scope.is_empty() {
+        return (None, None);
+    }
+    let parts: Vec<&str> = scope.split('#').collect();
+    let role = if parts[0] == "%%" {
+        None
+    } else {
+        Some(parts[0].to_string())
+    };
+    let rag = if parts.len() > 1 && !parts[1].is_empty() {
+        Some(parts[1].to_string())
+    } else {
+        None
+    };
+    (role, rag)
+}
+
+/// Extract query parameters from http::Uri for /api/sessions/load?name=...
+fn extract_query_param(uri: &http::Uri, key: &str) -> Option<String> {
+    uri.query()?
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find_map(|(k, v)| if k == key { Some(v.to_string()) } else { None })
 }
 
 #[derive(Debug, Deserialize)]
