@@ -989,7 +989,16 @@ fn extract_query_param(uri: &http::Uri, key: &str) -> Option<String> {
     uri.query()?
         .split('&')
         .filter_map(|pair| pair.split_once('='))
-        .find_map(|(k, v)| if k == key { Some(v.to_string()) } else { None })
+        .find_map(|(k, v)| {
+            if k == key {
+                Some(percent_encoding::percent_decode_str(v)
+                    .decode_utf8()
+                    .ok()?
+                    .into_owned())
+            } else {
+                None
+            }
+        })
 }
 
 #[derive(Debug, Deserialize)]
